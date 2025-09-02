@@ -1,4 +1,771 @@
-<!DOCTYPE html>
+<!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <script>
+      // ===== STATELESS MODE =====
+      (function () {
+        const PREFIXES = [
+          "sicredi_",
+          "shots",
+          "captured",
+          "comments",
+          "comment",
+          "analise",
+          "criticos",
+          "resumo",
+          "status",
+          "templates",
+          "pages",
+          "sicredi_shots_v1",
+          "sicredi_comments_v1",
+          "sicredi_status_v1",
+        ];
+
+        function clearAppStorage() {
+          const shouldClear = (key) =>
+            PREFIXES.some((p) => key === p || key.startsWith(p));
+          for (const store of [localStorage, sessionStorage]) {
+            const keys = [];
+            for (let i = 0; i < store.length; i++) keys.push(store.key(i));
+            keys.forEach((k) => {
+              if (shouldClear(k)) store.removeItem(k);
+            });
+          }
+        }
+
+        clearAppStorage();
+
+        const _setItem = localStorage.setItem.bind(localStorage);
+        const _getItem = localStorage.getItem.bind(localStorage);
+        const _removeItem = localStorage.removeItem.bind(localStorage);
+
+        const isOurKey = (k) =>
+          !!k && PREFIXES.some((p) => k === p || k.startsWith(p));
+
+        localStorage.setItem = (k, v) => {
+          if (isOurKey(k)) sessionStorage.setItem(k, v);
+          else _setItem(k, v);
+        };
+        localStorage.getItem = (k) => {
+          if (isOurKey(k)) return sessionStorage.getItem(k);
+          return _getItem(k);
+        };
+        localStorage.removeItem = (k) => {
+          if (isOurKey(k)) sessionStorage.removeItem(k);
+          else _removeItem(k);
+        };
+
+        window.addEventListener("pageshow", (e) => {
+          if (e.persisted) clearAppStorage();
+        });
+      })();
+
+      // ===== CONFIG =====
+      const CONFIG = {
+        STORAGE_KEYS: {
+          PAGES: "sicredi_pages_v2",
+          COMMENTS: "sicredi_comments_v2",
+          STATUS: "sicredi_status_v2",
+          SHOTS: "sicredi_shots_v1",
+          AUTO_SAVE: "sicredi_report_v3_",
+          TEMPLATES: "sicredi_templates_v3",
+        },
+        PDF: {
+          MARGINS: 12,
+          DEFAULT_FILENAME: "relatorio-sicredi",
+          QUALITY: 0.95,
+        },
+        DEBOUNCE_DELAY: 300,
+        AUTOSAVE_DELAY: 2000,
+      };
+
+      const CAPTURE_ENDPOINT = "http://localhost:3001/capture";
+
+      // ===== STATE =====
+      let pages = [];
+      let currentIndex = 0;
+
+      // ===== INIT =====
+      document.addEventListener("DOMContentLoaded", async () => {
+        let fetchedPages;
+        try {
+          const response = await fetch("./pages-config.json");
+          fetchedPages = await response.json();
+        } catch (err) {
+          console.error("Falha ao carregar pages-config.json:", err);
+          fetchedPages = [
+            {
+              title: "Página inicial padrão",
+              src: "about:blank",
+              width: "600",
+              height: "1000",
+            },
+          ];
+        }
+
+        pages = fetchedPages;
+
+        setupAutoSave();
+        setupKeyboardNavigation();
+
+        renderCurrentPage(0);
+        renderDashboardList();
+        refreshHeaderInfo();
+        updateRemoveButton();
+        atualizarSaida();
+
+        const frame = document.getElementById("reportFrame");
+        frame.addEventListener("load", () => {
+          document.getElementById("iframeSkeleton").style.display = "none";
+        });
+      });
+
+      // ===== MOBILE SIDEBAR =====
+      function toggleMobileSidebar() {
+        const sidebar = document.querySelector('.sidebar');
+        const overlay = document.querySelector('.mobile-sidebar-overlay');
+        sidebar.classList.toggle('show');
+        overlay.classList.toggle('show');
+      }
+
+      // ===== STEP NAVIGATION =====
+      function setActiveStep(index) {
+        const steps = document.querySelectorAll('.step');
+        steps.forEach((step, i) => {
+          step.classList.toggle('active', i === index);
+        });
+      }
+
+      // ===== PERSISTENCE =====
+      function loadPages() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.PAGES) || "[]"
+          );
+        } catch {
+          return [];
+        }
+      }
+
+      function persistPages() {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.PAGES, JSON.stringify(pages));
+      }
+
+      // ===== SCREENSHOTS =====
+      function loadShots() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.SHOTS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveShots(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.SHOTS, JSON.stringify(map));
+      }
+
+      function getShotForPage(p) {
+        const map = loadShots();
+        return map[pageKey(p)] || null;
+      }
+
+      function setShotForPage(p, dataUrl) {
+        const map = loadShots();
+        map[pageKey(p)] = dataUrl;
+        saveShots(map);
+      }
+
+      // ===== NAVIGATION =====
+      function prevPage() {
+        let newIndex = currentIndex - 1;
+        if (newIndex >= 0) {
+          selectPage(newIndex);
+        }
+      }
+
+      function nextPage() {
+        let newIndex = currentIndex + 1;
+        if (newIndex < pages.length) {
+          selectPage(newIndex);
+        }
+      }
+
+      // ===== HELPERS =====
+      function pageKey(page) {
+        return page?.src || `page_${currentIndex}`;
+      }
+
+      // ===== RENDER =====
+      function renderCurrentPage() {
+        const frame = document.getElementById("reportFrame");
+        const skeleton = document.getElementById("iframeSkeleton");
+        skeleton.style.display = "flex";
+
+        const page = pages[currentIndex];
+        if (!page) return;
+
+        frame.src = page.src;
+        frame.style.height = `${page.height || 1550}px`;
+
+        document.getElementById("pageTitle").textContent =
+          page.title || "Sem título";
+        document.getElementById("currentIndex").textContent = pages.length
+          ? currentIndex + 1
+          : 0;
+        document.getElementById("totalPages").textContent = pages.length;
+
+        const statusMap = loadStatuses();
+        const pageStatus = statusMap[pageKey(page)] || "pendente";
+
+        renderComments();
+        atualizarSaida();
+        updateDashboardListActiveState();
+      }
+
+      function renderDashboardList() {
+        const listContainer = document.getElementById("dashboard-list");
+        if (!listContainer) return;
+        listContainer.innerHTML = pages
+          .map(
+            (p, i) => `
+          <button class="dashboard-btn" onclick="selectPage(${i})">
+            <span class="dashboard-indicator"></span>
+            ${p.title}
+          </button>
+        `
+          )
+          .join("");
+        updateDashboardListActiveState();
+      }
+
+      function selectPage(index) {
+        currentIndex = index;
+        renderCurrentPage();
+        refreshHeaderInfo();
+        setActiveStep(0);
+      }
+
+      function updateDashboardListActiveState() {
+        document.querySelectorAll(".dashboard-btn").forEach((btn, index) => {
+          if (index === currentIndex) {
+            btn.classList.add("active");
+          } else {
+            btn.classList.remove("active");
+          }
+        });
+      }
+
+      function refreshHeaderInfo() {
+        const prevBtn = document.querySelector(
+          ".nav-controls .nav-btn:first-child"
+        );
+        const nextBtn = document.querySelector(
+          ".nav-controls .nav-btn:last-child"
+        );
+        prevBtn.disabled = currentIndex === 0;
+        nextBtn.disabled = currentIndex >= pages.length - 1;
+      }
+
+      function updateRemoveButton() {
+        // Função mantida para compatibilidade
+      }
+
+      // ===== EDIT TITLE =====
+      function editPageTitle(el) {
+        if (el.isContentEditable) return;
+        const original = el.textContent;
+        el.contentEditable = true;
+        el.classList.add("editing");
+        el.focus();
+
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        const finish = (commit = true) => {
+          el.classList.remove("editing");
+          el.contentEditable = false;
+          const newTitle = el.textContent.trim();
+          if (commit && newTitle && pages[currentIndex]) {
+            pages[currentIndex].title = newTitle;
+            persistPages();
+            atualizarSaida();
+            toast("✅ Título atualizado!", "success");
+          } else {
+            el.textContent = original;
+          }
+        };
+        el.addEventListener("blur", () => finish(true), { once: true });
+        el.addEventListener(
+          "keydown",
+          (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              finish(true);
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              finish(false);
+            }
+          },
+          { once: true }
+        );
+      }
+
+      // ===== STATUS =====
+      function loadStatuses() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.STATUS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveStatuses(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.STATUS, JSON.stringify(map));
+      }
+
+      function savePageStatus() {
+        const map = loadStatuses();
+        const pageStatus = "validado";
+        map[pageKey(pages[currentIndex])] = pageStatus;
+        saveStatuses(map);
+        atualizarSaida();
+      }
+
+      // ===== PAGE ACTIONS =====
+      function openCurrentInNewTab() {
+        const p = pages[currentIndex];
+        if (p?.src) window.open(p.src, "_blank", "noopener");
+      }
+
+      // ===== COMMENTS =====
+      function getCommentsMap() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.COMMENTS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveCommentsMap(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.COMMENTS, JSON.stringify(map));
+      }
+
+      function currentComments() {
+        const map = getCommentsMap();
+        return map[pageKey(pages[currentIndex])] || [];
+      }
+
+      function renderComments() {
+        const list = document.getElementById("commentList");
+        list.innerHTML = "";
+        currentComments().forEach((c, idx) => {
+          const li = document.createElement("li");
+          li.className = "comment-item fade-in";
+          li.innerHTML = `
+            <div class="comment-meta">
+              <span class="comment-tag">${c.tag}</span>
+              <span class="comment-info">${
+                c.author ? c.author + " • " : ""
+              }${new Date(c.createdAt).toLocaleString("pt-BR")}</span>
+            </div>
+            <div class="comment-text">${escapeHTML(c.text).replace(
+              /\n/g,
+              "<br>"
+            )}</div>
+            <div class="comment-actions">
+              <button class="btn-tiny" onclick="deleteComment(${idx})">Remover</button>
+            </div>`;
+          list.appendChild(li);
+        });
+      }
+
+      function addComment() {
+        const author = document.getElementById("commentAuthor").value.trim();
+        const tag = document.getElementById("commentTag").value;
+        const text = document.getElementById("commentText").value.trim();
+        if (!text) {
+          toast("⚠️ Escreva um comentário.", "warning");
+          return;
+        }
+        const map = getCommentsMap();
+        const key = pageKey(pages[currentIndex]);
+        map[key] = map[key] || [];
+        map[key].push({
+          author,
+          tag,
+          text,
+          createdAt: new Date().toISOString(),
+        });
+        saveCommentsMap(map);
+        document.getElementById("commentText").value = "";
+        renderComments();
+        atualizarSaida();
+        toast("💬 Comentário adicionado!", "success");
+      }
+
+      function deleteComment(index) {
+        const map = getCommentsMap();
+        const key = pageKey(pages[currentIndex]);
+        (map[key] || []).splice(index, 1);
+        saveCommentsMap(map);
+        renderComments();
+        atualizarSaida();
+      }
+
+      function clearComments() {
+        const key = pageKey(pages[currentIndex]);
+        const map = getCommentsMap();
+        map[key] = [];
+        saveCommentsMap(map);
+        renderComments();
+        atualizarSaida();
+        toast("🧹 Comentários limpos!", "success");
+      }
+
+      function exportCommentsCSV() {
+        const rows = [];
+        pages.forEach((p, i) => {
+          const key = pageKey(p);
+          const list = getCommentsMap()[key] || [];
+          const status = loadStatuses()[key] || "pendente";
+          if (!list.length) {
+            rows.push([i + 1, p.title, status, "", "", ""]);
+          } else {
+            list.forEach((c) =>
+              rows.push([
+                i + 1,
+                p.title,
+                status,
+                c.tag,
+                c.author || "",
+                c.text.replace(/\n/g, " "),
+              ])
+            );
+          }
+        });
+        const csv = ["Indice,Título,Status,Tag,Autor,Comentário"]
+          .concat(
+            rows.map((r) =>
+              r.map((s) => `"${String(s || "").replace(/"/g, '""')}"`).join(",")
+            )
+          )
+          .join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `comentarios-sicredi-${new Date()
+          .toISOString()
+          .slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      // ===== AUTOSAVE / TEMPLATES =====
+      function setupAutoSave() {
+        document.querySelectorAll(".editor").forEach((ed) => {
+          const saved = localStorage.getItem(
+            CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id
+          );
+          if (saved) ed.innerText = saved;
+          ed.addEventListener(
+            "input",
+            debounce(() => {
+              localStorage.setItem(
+                CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id,
+                ed.innerText
+              );
+              toast("💾 Conteúdo salvo!", "info", 1800);
+              atualizarSaida();
+            }, CONFIG.AUTOSAVE_DELAY)
+          );
+        });
+      }
+
+      function saveTemplate(fieldId) {
+        const content = document.getElementById(fieldId).innerText.trim();
+        if (!content) return toast("⚠️ Campo vazio.", "warning");
+        const name = prompt(
+          "Nome do template:",
+          `${fieldId}_${new Date().toISOString().slice(0, 10)}`
+        );
+        if (!name) return;
+        const all = getTemplates();
+        all[name] = { fieldId, content, created: new Date().toISOString() };
+        localStorage.setItem(
+          CONFIG.STORAGE_KEYS.TEMPLATES,
+          JSON.stringify(all)
+        );
+        toast(`💾 Template "${name}" salvo!`, "success");
+      }
+
+      function loadTemplate(fieldId) {
+        const all = getTemplates();
+        const names = Object.keys(all).filter(
+          (n) => all[n].fieldId === fieldId
+        );
+        if (!names.length)
+          return toast("ℹ️ Nenhum template para este campo.", "info");
+        const list = names.map((n) => `• ${n}`).join("\n");
+        const pick = prompt(
+          `Templates disponíveis:\n${list}\n\nDigite o nome:`
+        );
+        if (pick && all[pick]) {
+          document.getElementById(fieldId).innerText = all[pick].content;
+          atualizarSaida();
+          toast(`📂 Template "${pick}" carregado!`, "success");
+        }
+      }
+
+      function getTemplates() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.TEMPLATES) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      // ===== PDF EXPORT =====
+      function safeTitle(s) {
+        return (s || "relatorio").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      }
+
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+      async function ensureShotFor(p) {
+        let shot = getShotForPage?.(p);
+        if (shot) return shot;
+
+        const url = `${CAPTURE_ENDPOINT}?url=${encodeURIComponent(p.src)}&w=${p.width||600}&h=${p.height||1500}`;
+        const res = await fetch(url);
+        if (res.status === 401) {
+          toast?.("🔒 Sessão Google expirada. Rode `npm run login` e tente novamente.", "warning", 4000);
+          throw new Error("LOGIN_REQUIRED");
+        }
+        if (!res.ok) throw new Error("CAPTURE_FAIL");
+        const json = await res.json();
+        if (!json?.ok || !json?.dataUrl) throw new Error("RES_INVALID");
+
+        setShotForPage?.(p, json.dataUrl);
+        return json.dataUrl;
+      }
+
+      function buildNotesHtml(p) {
+        const analise = (document.getElementById("analise")?.innerText || "").trim();
+        const criticos = (document.getElementById("criticos")?.innerText || "").trim();
+
+        const ul = document.getElementById("commentList");
+        const comments = [];
+        if (ul) {
+          ul.querySelectorAll("li").forEach(li => {
+            const text = (li.querySelector(".comment-text")?.innerText || "").trim();
+            const tag = (li.querySelector(".comment-tag")?.innerText || "").trim();
+            if (text) comments.push({ text, tag });
+          });
+        }
+
+        const fmt = (txt) => {
+          if (!txt) return '<p class="empty">— Sem conteúdo informado —</p>';
+          const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          if (lines.length === 1) return `<p>${escapeHtml(lines[0])}</p>`;
+          return `<ul class="print-list">` + lines.map(l => `<li>${escapeHtml(l)}</li>`).join("") + `</ul>`;
+        };
+
+        return `
+          <div class="print-meta">
+            <div><strong>${escapeHtml(p.title || "Relatório")}</strong></div>
+            <div>${new Date().toLocaleDateString("pt-BR")}</div>
+          </div>
+
+          <h1>Notas do Analista</h1>
+
+          <h2>Análise</h2>
+          <div class="print-card">${fmt(analise)}</div>
+
+          <h2>Pontos Críticos</h2>
+          <div class="print-card">${fmt(criticos)}</div>
+
+          <h2>Comentários</h2>
+          <div class="print-card print-comments">
+            ${
+              comments.length
+                ? comments.map(c => `<div class="c-item">${escapeHtml(c.text)} ${c.tag ? `<span class="print-tag">${escapeHtml(c.tag)}</span>` : ""}</div>`).join("")
+                : '<p class="empty">— Sem comentários adicionados —</p>'
+            }
+          </div>
+        `;
+      }
+
+      function escapeHtml(s) {
+        return s.replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+      }
+
+      async function renderNotesPageForPdf(p) {
+        const root = document.getElementById("notesPrintRoot");
+        if (!root) throw new Error("notesPrintRoot missing");
+        root.innerHTML = buildNotesHtml(p);
+        root.classList.remove("hidden");
+
+        await sleep(0);
+        const canvas = await html2canvas(root, { backgroundColor: "#ffffff", scale: 2, useCORS: true, windowWidth: 600 });
+        const dataUrl = canvas.toDataURL("image/png");
+        const height = canvas.height / 2;
+
+        root.classList.add("hidden");
+        root.innerHTML = "";
+        return { dataUrl, height };
+      }
+
+      async function exportCurrentAsTwoPagesPDF() {
+        setActiveStep(2);
+
+        try {
+          const p = pages[currentIndex];
+          if (!p) return;
+
+          const shot = await ensureShotFor(p);
+
+          const pageW = p.width || 600;
+          const pageH = p.height || 1500;
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({ unit: "px", format: [pageW, pageH], compress: true });
+
+          pdf.addImage(shot, "PNG", 0, 0, pageW, pageH, undefined, "SLOW");
+
+          const { dataUrl, height } = await renderNotesPageForPdf(p);
+          pdf.addPage([pageW, height]);
+          pdf.addImage(dataUrl, "PNG", 0, 0, pageW, height, undefined, "SLOW");
+
+          pdf.save(`${safeTitle(p.title)}.pdf`);
+          toast?.("✅ PDF gerado com sucesso!", "success");
+        } catch (err) {
+          console.error(err);
+          const msg = (err && err.message === "LOGIN_REQUIRED")
+            ? "🔒 Sessão expirada. Rode `npm run login`."
+            : "⚠ Não foi possível gerar o PDF.";
+          toast?.(msg, "error");
+        } finally {
+          setActiveStep(0);
+        }
+      }
+
+      function showPDFOptions(){ exportCurrentAsTwoPagesPDF(); }
+
+      // ===== REPORT PREVIEW =====
+      function atualizarSaida() {
+        const analise =
+          document.getElementById("analise").innerText.trim() ||
+          "Nenhuma análise informada.";
+        const criticos =
+          document.getElementById("criticos").innerText.trim() ||
+          "Nenhum ponto crítico informado.";
+        const now = new Date().toLocaleString("pt-BR");
+
+        // Atualizado para uma visualização mais limpa
+        document.getElementById("saida").innerHTML = `
+          <div style="padding: 2rem; background: white; border-radius: 16px; margin: 2rem 0;">
+            <h2 style="color: var(--sicredi-green); margin-bottom: 1rem;">Relatório Sicredi</h2>
+            <div style="text-align:center;margin-bottom:20px;color:#666;font-style:italic">
+              <em>Gerado em ${now}</em>
+            </div>
+          </div>`;
+      }
+
+      function scrollToReport() {
+        document
+          .getElementById("saida")
+          ?.scrollIntoView({ behavior: "smooth" });
+      }
+
+      // ===== UTILITIES =====
+      function debounce(fn, wait) {
+        let t;
+        return (...a) => {
+          clearTimeout(t);
+          t = setTimeout(() => fn(...a), wait);
+        };
+      }
+
+      function escapeHTML(s) {
+        return String(s || "").replace(
+          /[&<>"']/g,
+          (m) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            }[m])
+        );
+      }
+
+      function toast(message, type = "info", ms = 2500) {
+        document.querySelector(".notification")?.remove();
+        const n = document.createElement("div");
+        n.className = `notification ${type}`;
+        n.textContent = message;
+        document.body.appendChild(n);
+        setTimeout(() => n.classList.add("show"), 10);
+        setTimeout(() => {
+          n.classList.remove("show");
+          setTimeout(() => n.remove(), 300);
+        }, ms);
+      }
+
+      function setupKeyboardNavigation() {
+        document.addEventListener("keydown", (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            if (e.key === "s") {
+              e.preventDefault();
+              showPDFOptions();
+            }
+            if (e.key === "r") {
+              e.preventDefault();
+              scrollToReport();
+            }
+          }
+          if (e.key === "ArrowLeft" && !e.target.isContentEditable) prevPage();
+          if (e.key === "ArrowRight" && !e.target.isContentEditable) nextPage();
+        });
+      }
+
+      // ===== HELP MODAL =====
+      function showHelpModal() {
+        document.getElementById("modalRoot").innerHTML = `
+          <div class="modal-overlay show">
+            <div class="modal">
+              <h3>Como usar o Sistema</h3>
+              <p><strong>1. Escolha o Dashboard:</strong> Selecione um dos relatórios disponíveis na lista à esquerda.</p>
+              <p><strong>2. Adicione Análises:</strong> Preencha os campos de análise e pontos críticos.</p>
+              <p><strong>3. Adicione Comentários:</strong> Registre observações específicas para cada página.</p>
+              <p><strong>4. Exporte o PDF:</strong> Gere o relatório final com todas as informações consolidadas.</p>
+              <p style="margin-top: 1rem;"><em>Dica: Use Ctrl+S para exportar rapidamente o PDF!</em></p>
+              <div class="modal-buttons">
+                <button class="modal-btn primary" onclick="closeModal()">Entendi!</button>
+              </div>
+            </div>
+          </div>`;
+      }
+
+      function closeModal() {
+        document.getElementById("modalRoot").innerHTML = "";
+      }
+    </script>
+  </body>
+</html><!DOCTYPE html>
 <html lang="pt-br">
   <head>
     <meta charset="UTF-8" />
@@ -105,6 +872,10 @@
         justify-content: center;
         font-size: 1.5rem;
         backdrop-filter: blur(10px);
+        background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="white"><path d="M20 20h15v15H20z M35 20h15v15H35z M50 20h15v15H50z M65 20h15v15H65z M20 35h15v15H20z M65 35h15v15H65z M20 50h15v15H20z M35 50h15v15H35z M50 50h15v15H50z M65 50h15v15H65z M20 65h15v15H20z M35 65h15v15H35z M50 65h15v15H50z M65 65h15v15H65z"/></svg>');
+        background-size: 24px;
+        background-repeat: no-repeat;
+        background-position: center;
       }
 
       .header h1 {
@@ -574,19 +1345,6 @@
         background: white;
         transform: translateY(-2px);
         box-shadow: var(--shadow-md);
-      }
-
-      #captureBtn {
-        background: #10b981;
-        color: white;
-      }
-
-      #captureBtn:hover {
-        background: #059669;
-      }
-
-      #captureBtn.success {
-        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
       }
 
       /* ===== IFRAME CONTAINER ===== */
@@ -1319,60 +2077,51 @@
     </style>
   </head>
   <body>
-    <!-- Help Button -->
-    <button
-      class="help-btn"
-      onclick="showHelpModal()"
-      title="Ajuda"
-      aria-label="Abrir ajuda"
-    >
-      ?
-    </button>
-
     <!-- Header -->
     <header class="header">
       <div class="header-content">
         <div class="header-top">
           <div class="logo-section">
-            <div class="logo-icon">📊</div>
+            <div class="logo-icon"></div>
             <div>
-              <h1>SICREDI REPORT DASHBOARD</h1>
-              <p class="header-subtitle">
-                Sistema inteligente de análise e validação de relatórios
-              </p>
+              <h1>Sicredi Report</h1>
+              <div class="header-subtitle">Dashboard de Análise</div>
             </div>
           </div>
           <div class="header-actions">
-            <button class="header-btn" onclick="window.location.reload()">
-              🔄 Atualizar
-            </button>
-            <button class="header-btn mobile-menu-btn" onclick="toggleMobileSidebar()">
-              ☰ Menu
-            </button>
+            <button class="mobile-menu-btn" onclick="toggleMobileSidebar()">☰ Menu</button>
+            <button class="header-btn" onclick="showHelpModal()">? Ajuda</button>
           </div>
         </div>
       </div>
     </header>
 
-    <!-- Steps -->
+    <!-- Steps Container -->
     <div class="steps-container">
       <div class="steps">
-        <div class="step active" onclick="setActiveStep(0)">
+        <div class="step active">
           <div class="step-number">1</div>
           <div class="step-content">
-            <div class="step-title">Escolha o Dashboard</div>
-            <div class="step-desc">Selecione o relatório</div>
+            <div class="step-title">Escolher Dashboard</div>
+            <div class="step-desc">Selecione o relatório para analisar</div>
           </div>
         </div>
-        <div class="step" onclick="setActiveStep(1)">
+        <div class="step">
           <div class="step-number">2</div>
           <div class="step-content">
-            <div class="step-title">Análise e Comentários</div>
-            <div class="step-desc">Adicione suas observações</div>
+            <div class="step-title">Adicionar Análises</div>
+            <div class="step-desc">Preencha campos de análise</div>
           </div>
         </div>
-        <div class="step" onclick="setActiveStep(2)">
+        <div class="step">
           <div class="step-number">3</div>
+          <div class="step-content">
+            <div class="step-title">Adicionar Comentários</div>
+            <div class="step-desc">Registre observações específicas</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">4</div>
           <div class="step-content">
             <div class="step-title">Exportar PDF</div>
             <div class="step-desc">Gere o relatório final</div>
@@ -1381,21 +2130,18 @@
       </div>
     </div>
 
-    <!-- Mobile Sidebar Overlay -->
-    <div class="mobile-sidebar-overlay" onclick="toggleMobileSidebar()"></div>
-
-    <!-- Main Container -->
+    <!-- Container Principal -->
     <div class="container">
       <div class="main-grid">
         <!-- Sidebar -->
         <div class="sidebar">
-          <!-- Dashboards List -->
+          <!-- Lista de Dashboards -->
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">
-                <span class="card-icon">📂</span>
+              <div class="card-title">
+                <div class="card-icon">📊</div>
                 Dashboards Disponíveis
-              </h3>
+              </div>
             </div>
             <div id="dashboard-list" class="dashboard-list"></div>
           </div>
@@ -1403,1130 +2149,137 @@
           <!-- Análise -->
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">
-                <span class="card-icon">📊</span>
-                Análise Detalhada
-              </h3>
+              <div class="card-title">
+                <div class="card-icon">📝</div>
+                Análise
+              </div>
               <div class="template-controls">
-                <button
-                  class="template-btn"
-                  onclick="saveTemplate('analise')"
-                  title="Salvar template"
-                >
-                  💾
-                </button>
-                <button
-                  class="template-btn"
-                  onclick="loadTemplate('analise')"
-                  title="Carregar template"
-                >
-                  📂
-                </button>
+                <button class="template-btn" onclick="saveTemplate('analise')" title="Salvar Template">💾</button>
+                <button class="template-btn" onclick="loadTemplate('analise')" title="Carregar Template">📂</button>
               </div>
             </div>
             <div class="editor-container">
-              <div
-                class="editor"
-                contenteditable="true"
-                id="analise"
-                data-placeholder="Digite sua análise detalhada..."
-                aria-label="Campo de análise"
-              ></div>
+              <div id="analise" class="editor" contenteditable="true" data-placeholder="Digite sua análise aqui..."></div>
             </div>
           </div>
 
           <!-- Pontos Críticos -->
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">
-                <span class="card-icon">⚠️</span>
+              <div class="card-title">
+                <div class="card-icon">⚠️</div>
                 Pontos Críticos
-              </h3>
+              </div>
               <div class="template-controls">
-                <button
-                  class="template-btn"
-                  onclick="saveTemplate('criticos')"
-                  title="Salvar template"
-                >
-                  💾
-                </button>
-                <button
-                  class="template-btn"
-                  onclick="loadTemplate('criticos')"
-                  title="Carregar template"
-                >
-                  📂
-                </button>
+                <button class="template-btn" onclick="saveTemplate('criticos')" title="Salvar Template">💾</button>
+                <button class="template-btn" onclick="loadTemplate('criticos')" title="Carregar Template">📂</button>
               </div>
             </div>
             <div class="editor-container">
-              <div
-                class="editor"
-                contenteditable="true"
-                id="criticos"
-                data-placeholder="Liste os pontos críticos identificados..."
-                aria-label="Campo de pontos críticos"
-              ></div>
-            </div>
-          </div>
-
-          <!-- Resumo Executivo -->
-          <div class="card">
-            <div class="card-header">
-              <h3 class="card-title">
-                <span class="card-icon">📝</span>
-                Resumo Executivo
-              </h3>
-              <div class="template-controls">
-                <button
-                  class="template-btn"
-                  onclick="saveTemplate('resumo')"
-                  title="Salvar template"
-                >
-                  💾
-                </button>
-                <button
-                  class="template-btn"
-                  onclick="loadTemplate('resumo')"
-                  title="Carregar template"
-                >
-                  📂
-                </button>
-              </div>
-            </div>
-            <div class="editor-container">
-              <div
-                class="editor"
-                contenteditable="true"
-                id="resumo"
-                data-placeholder="Escreva o resumo executivo..."
-                aria-label="Campo de resumo executivo"
-              ></div>
+              <div id="criticos" class="editor" contenteditable="true" data-placeholder="Digite os pontos críticos aqui..."></div>
             </div>
           </div>
         </div>
 
-        <!-- Report Area -->
+        <!-- Área do Relatório -->
         <div class="report-area">
+          <!-- Report Header -->
           <div class="report-header">
             <div class="report-nav">
-              <h3 class="nav-title">
-                📋 Páginas do Relatório
-              </h3>
+              <div class="nav-title">
+                📈 Relatório
+              </div>
               <div class="nav-controls">
-                <button
-                  class="nav-btn"
-                  onclick="prevPage()"
-                  aria-label="Página anterior"
-                >
-                  ←
-                </button>
-                <span class="page-counter">
-                  <span id="currentIndex">1</span> /
-                  <span id="totalPages">1</span>
-                </span>
-                <button
-                  class="nav-btn"
-                  onclick="nextPage()"
-                  aria-label="Próxima página"
-                >
-                  →
-                </button>
+                <button class="nav-btn" onclick="prevPage()" title="Página Anterior">←</button>
+                <div class="page-counter">
+                  <span id="currentIndex">0</span> / <span id="totalPages">0</span>
+                </div>
+                <button class="nav-btn" onclick="nextPage()" title="Próxima Página">→</button>
               </div>
             </div>
-
             <div class="page-toolbar">
-              <div
-                class="page-title"
-                id="pageTitle"
-                onclick="editPageTitle(this)"
-                title="Clique para editar o título"
-                tabindex="0"
-              >
-                Página inicial
-              </div>
-
+              <div id="pageTitle" class="page-title" onclick="editPageTitle(this)">Carregando...</div>
               <div class="page-actions">
-                <button
-                  class="btn-action"
-                  onclick="openCurrentInNewTab()"
-                  title="Abrir no Looker em nova guia"
-                >
-                  🔗 Abrir
+                <button class="btn-action" onclick="openCurrentInNewTab()">
+                  🔗 Abrir Link
                 </button>
-                <button
-                  class="btn-action"
-                  onclick="copyCurrentLink()"
-                  title="Copiar link da página"
-                >
-                  📋 Copiar Link
-                </button>
-                <button
-                  id="captureBtn"
-                  class="btn-action"
-                  onclick="captureCurrentPageImage()"
-                  title="Capturar imagem desta página"
-                >
-                  📸 Capturar
+                <button class="btn-action" onclick="showPDFOptions()">
+                  📄 Exportar PDF
                 </button>
               </div>
             </div>
           </div>
 
-          <!-- Iframe -->
+          <!-- Iframe Container -->
           <div class="iframe-container">
-            <div class="iframe-skeleton" id="iframeSkeleton">
+            <div id="iframeSkeleton" class="iframe-skeleton">
               <div class="skeleton-loader"></div>
-              <div class="skeleton-text">Carregando dashboard...</div>
+              <div class="skeleton-text">Carregando página...</div>
             </div>
-            <iframe
-              id="reportFrame"
-              title="Página do relatório Sicredi"
-              loading="lazy"
-              referrerpolicy="no-referrer-when-downgrade"
-              allowfullscreen
-              sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-            ></iframe>
+            <iframe id="reportFrame" src="about:blank"></iframe>
           </div>
 
           <!-- Comments Section -->
-          <div id="commentsForPdf" class="comments-section">
+          <div class="comments-section">
             <div class="comments-header">
-              <h4 class="comments-title">
-                💬 Comentários desta Página
-              </h4>
+              <div class="comments-title">
+                💬 Comentários da Página
+              </div>
               <div class="comments-actions">
-                <button class="btn-sm" onclick="exportCommentsCSV()">
-                  ⬇️ Exportar CSV
-                </button>
                 <button class="btn-sm" onclick="clearComments()">
                   🧹 Limpar
                 </button>
+                <button class="btn-sm" onclick="exportCommentsCSV()">
+                  📊 Exportar CSV
+                </button>
               </div>
             </div>
 
+            <!-- Comment Form -->
             <div class="comment-form">
               <div class="comment-form-grid">
-                <input
-                  id="commentAuthor"
-                  type="text"
-                  placeholder="Seu nome (opcional)"
-                />
+                <input id="commentAuthor" type="text" placeholder="Seu nome (opcional)">
                 <select id="commentTag">
-                  <option value="obs">💭 Observação</option>
-                  <option value="risco">⚠️ Risco</option>
-                  <option value="dado">📊 Dado</option>
-                  <option value="pergunta">❓ Pergunta</option>
+                  <option value="info">ℹ️ Informativo</option>
+                  <option value="warning">⚠️ Atenção</option>
+                  <option value="critical">🚨 Crítico</option>
+                  <option value="suggestion">💡 Sugestão</option>
                 </select>
               </div>
-              <textarea
-                id="commentText"
-                rows="3"
-                placeholder="Escreva um comentário sobre esta página..."
-              ></textarea>
+              <textarea id="commentText" placeholder="Digite seu comentário..."></textarea>
               <button class="btn-primary" onclick="addComment()">
-                💬 Adicionar Comentário
+                ➕ Adicionar Comentário
               </button>
             </div>
 
+            <!-- Comments List -->
             <ul id="commentList" class="comment-list"></ul>
           </div>
         </div>
       </div>
-
-      <!-- Hidden Print Root -->
-      <div id="notesPrintRoot" class="print-root hidden" aria-hidden="true"></div>
-
-      <!-- Hidden Report Preview -->
-      <div
-        id="saida"
-        class="report-preview hidden"
-        role="region"
-        aria-label="Visualização do relatório"
-      ></div>
-
-      <!-- PDF Controls -->
-      <div class="pdf-controls">
-        <button
-          class="btn-primary"
-          onclick="showPDFOptions()"
-          aria-label="Configurar e baixar relatório em PDF"
-        >
-          📄 Baixar PDF
-        </button>
-        <button
-          class="btn-secondary"
-          onclick="scrollToReport()"
-          aria-label="Visualizar relatório na página"
-        >
-          👁️ Ver Relatório
-        </button>
-      </div>
     </div>
+
+    <!-- PDF Export Controls -->
+    <div class="pdf-controls">
+      <button class="btn-primary" onclick="showPDFOptions()">
+        📄 Exportar PDF Completo
+      </button>
+      <button class="btn-secondary" onclick="scrollToReport()">
+        📋 Ver Prévia do Relatório
+      </button>
+    </div>
+
+    <!-- Saída do Relatório -->
+    <div id="saida"></div>
+
+    <!-- Mobile Sidebar Overlay -->
+    <div class="mobile-sidebar-overlay" onclick="toggleMobileSidebar()"></div>
+
+    <!-- Help Button -->
+    <button class="help-btn" onclick="showHelpModal()">?</button>
 
     <!-- Modal Root -->
     <div id="modalRoot"></div>
 
-    <!-- Scripts -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-
-    <script>
-      // ===== STATELESS MODE =====
-      (function () {
-        const PREFIXES = [
-          "sicredi_",
-          "shots",
-          "captured",
-          "comments",
-          "comment",
-          "analise",
-          "criticos",
-          "resumo",
-          "status",
-          "templates",
-          "pages",
-          "sicredi_shots_v1",
-          "sicredi_comments_v1",
-          "sicredi_status_v1",
-        ];
-
-        function clearAppStorage() {
-          const shouldClear = (key) =>
-            PREFIXES.some((p) => key === p || key.startsWith(p));
-          for (const store of [localStorage, sessionStorage]) {
-            const keys = [];
-            for (let i = 0; i < store.length; i++) keys.push(store.key(i));
-            keys.forEach((k) => {
-              if (shouldClear(k)) store.removeItem(k);
-            });
-          }
-        }
-
-        clearAppStorage();
-
-        const _setItem = localStorage.setItem.bind(localStorage);
-        const _getItem = localStorage.getItem.bind(localStorage);
-        const _removeItem = localStorage.removeItem.bind(localStorage);
-
-        const isOurKey = (k) =>
-          !!k && PREFIXES.some((p) => k === p || k.startsWith(p));
-
-        localStorage.setItem = (k, v) => {
-          if (isOurKey(k)) sessionStorage.setItem(k, v);
-          else _setItem(k, v);
-        };
-        localStorage.getItem = (k) => {
-          if (isOurKey(k)) return sessionStorage.getItem(k);
-          return _getItem(k);
-        };
-        localStorage.removeItem = (k) => {
-          if (isOurKey(k)) sessionStorage.removeItem(k);
-          else _removeItem(k);
-        };
-
-        window.addEventListener("pageshow", (e) => {
-          if (e.persisted) clearAppStorage();
-        });
-      })();
-
-      // ===== CONFIG =====
-      const CONFIG = {
-        STORAGE_KEYS: {
-          PAGES: "sicredi_pages_v2",
-          COMMENTS: "sicredi_comments_v2",
-          STATUS: "sicredi_status_v2",
-          SHOTS: "sicredi_shots_v1",
-          AUTO_SAVE: "sicredi_report_v3_",
-          TEMPLATES: "sicredi_templates_v3",
-        },
-        PDF: {
-          MARGINS: 12,
-          DEFAULT_FILENAME: "relatorio-sicredi",
-          QUALITY: 0.95,
-        },
-        DEBOUNCE_DELAY: 300,
-        AUTOSAVE_DELAY: 2000,
-      };
-
-      const CAPTURE_ENDPOINT = "http://localhost:3001/capture";
-
-      // ===== STATE =====
-      let pages = [];
-      let currentIndex = 0;
-
-      // ===== INIT =====
-      document.addEventListener("DOMContentLoaded", async () => {
-        let fetchedPages;
-        try {
-          const response = await fetch("./pages-config.json");
-          fetchedPages = await response.json();
-        } catch (err) {
-          console.error("Falha ao carregar pages-config.json:", err);
-          fetchedPages = [
-            {
-              title: "Página inicial padrão",
-              src: "about:blank",
-              width: "600",
-              height: "1000",
-            },
-          ];
-        }
-
-        pages = fetchedPages;
-
-        setupAutoSave();
-        setupKeyboardNavigation();
-
-        renderCurrentPage(0);
-        renderDashboardList();
-        refreshHeaderInfo();
-        updateRemoveButton();
-        atualizarSaida();
-
-        const frame = document.getElementById("reportFrame");
-        frame.addEventListener("load", () => {
-          document.getElementById("iframeSkeleton").style.display = "none";
-        });
-      });
-
-      // ===== MOBILE SIDEBAR =====
-      function toggleMobileSidebar() {
-        const sidebar = document.querySelector('.sidebar');
-        const overlay = document.querySelector('.mobile-sidebar-overlay');
-        sidebar.classList.toggle('show');
-        overlay.classList.toggle('show');
-      }
-
-      // ===== STEP NAVIGATION =====
-      function setActiveStep(index) {
-        const steps = document.querySelectorAll('.step');
-        steps.forEach((step, i) => {
-          step.classList.toggle('active', i === index);
-        });
-      }
-
-      // ===== PERSISTENCE =====
-      function loadPages() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.PAGES) || "[]"
-          );
-        } catch {
-          return [];
-        }
-      }
-
-      function persistPages() {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.PAGES, JSON.stringify(pages));
-      }
-
-      // ===== SCREENSHOTS =====
-      function loadShots() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.SHOTS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveShots(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.SHOTS, JSON.stringify(map));
-      }
-
-      function getShotForPage(p) {
-        const map = loadShots();
-        return map[pageKey(p)] || null;
-      }
-
-      function setShotForPage(p, dataUrl) {
-        const map = loadShots();
-        map[pageKey(p)] = dataUrl;
-        saveShots(map);
-      }
-
-      // ===== NAVIGATION =====
-      function prevPage() {
-        let newIndex = currentIndex - 1;
-        if (newIndex >= 0) {
-          selectPage(newIndex);
-        }
-      }
-
-      function nextPage() {
-        let newIndex = currentIndex + 1;
-        if (newIndex < pages.length) {
-          selectPage(newIndex);
-        }
-      }
-
-      // ===== HELPERS =====
-      function pageKey(page) {
-        return page?.src || `page_${currentIndex}`;
-      }
-
-      // ===== RENDER =====
-      function renderCurrentPage() {
-        const frame = document.getElementById("reportFrame");
-        const skeleton = document.getElementById("iframeSkeleton");
-        skeleton.style.display = "flex";
-
-        const page = pages[currentIndex];
-        if (!page) return;
-
-        frame.src = page.src;
-        frame.style.height = `${page.height || 1550}px`;
-
-        document.getElementById("pageTitle").textContent =
-          page.title || "Sem título";
-        document.getElementById("currentIndex").textContent = pages.length
-          ? currentIndex + 1
-          : 0;
-        document.getElementById("totalPages").textContent = pages.length;
-
-        const statusMap = loadStatuses();
-        const pageStatus = statusMap[pageKey(page)] || "pendente";
-
-        renderComments();
-        atualizarSaida();
-        updateCaptureButtonState();
-        updateDashboardListActiveState();
-      }
-
-      function renderDashboardList() {
-        const listContainer = document.getElementById("dashboard-list");
-        if (!listContainer) return;
-        listContainer.innerHTML = pages
-          .map(
-            (p, i) => `
-          <button class="dashboard-btn" onclick="selectPage(${i})">
-            <span class="dashboard-indicator"></span>
-            ${p.title}
-          </button>
-        `
-          )
-          .join("");
-        updateDashboardListActiveState();
-      }
-
-      function selectPage(index) {
-        currentIndex = index;
-        renderCurrentPage();
-        refreshHeaderInfo();
-        setActiveStep(0);
-      }
-
-      function updateDashboardListActiveState() {
-        document.querySelectorAll(".dashboard-btn").forEach((btn, index) => {
-          if (index === currentIndex) {
-            btn.classList.add("active");
-          } else {
-            btn.classList.remove("active");
-          }
-        });
-      }
-
-      function refreshHeaderInfo() {
-        const prevBtn = document.querySelector(
-          ".nav-controls .nav-btn:first-child"
-        );
-        const nextBtn = document.querySelector(
-          ".nav-controls .nav-btn:last-child"
-        );
-        prevBtn.disabled = currentIndex === 0;
-        nextBtn.disabled = currentIndex >= pages.length - 1;
-      }
-
-      function updateRemoveButton() {
-        // Função mantida para compatibilidade
-      }
-
-      function updateCaptureButtonState() {
-        const page = pages[currentIndex];
-        if (!page) return;
-
-        const captureButton = document.getElementById("captureBtn");
-        const hasShot = !!getShotForPage(page);
-
-        if (hasShot) {
-          captureButton.innerHTML = "🖼️ Capturado";
-          captureButton.classList.add("success");
-          captureButton.title =
-            "A imagem desta página já foi capturada. Clique para capturar novamente.";
-        } else {
-          captureButton.innerHTML = "📸 Capturar";
-          captureButton.classList.remove("success");
-          captureButton.title = "Capturar imagem desta página";
-        }
-      }
-
-      // ===== EDIT TITLE =====
-      function editPageTitle(el) {
-        if (el.isContentEditable) return;
-        const original = el.textContent;
-        el.contentEditable = true;
-        el.classList.add("editing");
-        el.focus();
-
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-
-        const finish = (commit = true) => {
-          el.classList.remove("editing");
-          el.contentEditable = false;
-          const newTitle = el.textContent.trim();
-          if (commit && newTitle && pages[currentIndex]) {
-            pages[currentIndex].title = newTitle;
-            persistPages();
-            atualizarSaida();
-            toast("✅ Título atualizado!", "success");
-          } else {
-            el.textContent = original;
-          }
-        };
-        el.addEventListener("blur", () => finish(true), { once: true });
-        el.addEventListener(
-          "keydown",
-          (e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              finish(true);
-            }
-            if (e.key === "Escape") {
-              e.preventDefault();
-              finish(false);
-            }
-          },
-          { once: true }
-        );
-      }
-
-      // ===== STATUS =====
-      function loadStatuses() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.STATUS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveStatuses(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.STATUS, JSON.stringify(map));
-      }
-
-      function savePageStatus() {
-        const map = loadStatuses();
-        const pageStatus = "validado"; // Simplificado
-        map[pageKey(pages[currentIndex])] = pageStatus;
-        saveStatuses(map);
-        atualizarSaida();
-      }
-
-      // ===== PAGE ACTIONS =====
-      function openCurrentInNewTab() {
-        const p = pages[currentIndex];
-        if (p?.src) window.open(p.src, "_blank", "noopener");
-      }
-
-      function copyCurrentLink() {
-        const p = pages[currentIndex];
-        if (!p?.src) return;
-        navigator.clipboard
-          .writeText(p.src)
-          .then(() => toast("🔗 Link copiado!", "success"));
-      }
-
-      // ===== COMMENTS =====
-      function getCommentsMap() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.COMMENTS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveCommentsMap(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.COMMENTS, JSON.stringify(map));
-      }
-
-      function currentComments() {
-        const map = getCommentsMap();
-        return map[pageKey(pages[currentIndex])] || [];
-      }
-
-      function renderComments() {
-        const list = document.getElementById("commentList");
-        list.innerHTML = "";
-        currentComments().forEach((c, idx) => {
-          const li = document.createElement("li");
-          li.className = "comment-item fade-in";
-          li.innerHTML = `
-            <div class="comment-meta">
-              <span class="comment-tag">${c.tag}</span>
-              <span class="comment-info">${
-                c.author ? c.author + " • " : ""
-              }${new Date(c.createdAt).toLocaleString("pt-BR")}</span>
-            </div>
-            <div class="comment-text">${escapeHTML(c.text).replace(
-              /\n/g,
-              "<br>"
-            )}</div>
-            <div class="comment-actions">
-              <button class="btn-tiny" onclick="deleteComment(${idx})">Remover</button>
-            </div>`;
-          list.appendChild(li);
-        });
-      }
-
-      function addComment() {
-        const author = document.getElementById("commentAuthor").value.trim();
-        const tag = document.getElementById("commentTag").value;
-        const text = document.getElementById("commentText").value.trim();
-        if (!text) {
-          toast("⚠️ Escreva um comentário.", "warning");
-          return;
-        }
-        const map = getCommentsMap();
-        const key = pageKey(pages[currentIndex]);
-        map[key] = map[key] || [];
-        map[key].push({
-          author,
-          tag,
-          text,
-          createdAt: new Date().toISOString(),
-        });
-        saveCommentsMap(map);
-        document.getElementById("commentText").value = "";
-        renderComments();
-        atualizarSaida();
-        toast("💬 Comentário adicionado!", "success");
-      }
-
-      function deleteComment(index) {
-        const map = getCommentsMap();
-        const key = pageKey(pages[currentIndex]);
-        (map[key] || []).splice(index, 1);
-        saveCommentsMap(map);
-        renderComments();
-        atualizarSaida();
-      }
-
-      function clearComments() {
-        const key = pageKey(pages[currentIndex]);
-        const map = getCommentsMap();
-        map[key] = [];
-        saveCommentsMap(map);
-        renderComments();
-        atualizarSaida();
-        toast("🧹 Comentários limpos!", "success");
-      }
-
-      function exportCommentsCSV() {
-        const rows = [];
-        pages.forEach((p, i) => {
-          const key = pageKey(p);
-          const list = getCommentsMap()[key] || [];
-          const status = loadStatuses()[key] || "pendente";
-          if (!list.length) {
-            rows.push([i + 1, p.title, status, "", "", ""]);
-          } else {
-            list.forEach((c) =>
-              rows.push([
-                i + 1,
-                p.title,
-                status,
-                c.tag,
-                c.author || "",
-                c.text.replace(/\n/g, " "),
-              ])
-            );
-          }
-        });
-        const csv = ["Indice,Título,Status,Tag,Autor,Comentário"]
-          .concat(
-            rows.map((r) =>
-              r.map((s) => `"${String(s || "").replace(/"/g, '""')}"`).join(",")
-            )
-          )
-          .join("\n");
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `comentarios-sicredi-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }
-
-      // ===== AUTOSAVE / TEMPLATES =====
-      function setupAutoSave() {
-        document.querySelectorAll(".editor").forEach((ed) => {
-          const saved = localStorage.getItem(
-            CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id
-          );
-          if (saved) ed.innerText = saved;
-          ed.addEventListener(
-            "input",
-            debounce(() => {
-              localStorage.setItem(
-                CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id,
-                ed.innerText
-              );
-              toast("💾 Conteúdo salvo!", "info", 1800);
-              atualizarSaida();
-            }, CONFIG.AUTOSAVE_DELAY)
-          );
-        });
-      }
-
-      function saveTemplate(fieldId) {
-        const content = document.getElementById(fieldId).innerText.trim();
-        if (!content) return toast("⚠️ Campo vazio.", "warning");
-        const name = prompt(
-          "Nome do template:",
-          `${fieldId}_${new Date().toISOString().slice(0, 10)}`
-        );
-        if (!name) return;
-        const all = getTemplates();
-        all[name] = { fieldId, content, created: new Date().toISOString() };
-        localStorage.setItem(
-          CONFIG.STORAGE_KEYS.TEMPLATES,
-          JSON.stringify(all)
-        );
-        toast(`💾 Template "${name}" salvo!`, "success");
-      }
-
-      function loadTemplate(fieldId) {
-        const all = getTemplates();
-        const names = Object.keys(all).filter(
-          (n) => all[n].fieldId === fieldId
-        );
-        if (!names.length)
-          return toast("ℹ️ Nenhum template para este campo.", "info");
-        const list = names.map((n) => `• ${n}`).join("\n");
-        const pick = prompt(
-          `Templates disponíveis:\n${list}\n\nDigite o nome:`
-        );
-        if (pick && all[pick]) {
-          document.getElementById(fieldId).innerText = all[pick].content;
-          atualizarSaida();
-          toast(`📂 Template "${pick}" carregado!`, "success");
-        }
-      }
-
-      function getTemplates() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.TEMPLATES) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      // ===== CAPTURE IMAGE =====
-      async function captureCurrentPageImage() {
-        const p = pages[currentIndex];
-        if (!p?.src) return;
-
-        const captureButton = document.getElementById("captureBtn");
-        captureButton.disabled = true;
-        captureButton.textContent = "⏳ Capturando...";
-
-        const url = `${CAPTURE_ENDPOINT}?url=${encodeURIComponent(p.src)}&w=${
-          p.width || 650
-        }&h=${p.height || 1350}`;
-
-        try {
-          const res = await fetch(url);
-          if (res.status === 401) {
-            toast(
-              "🔒 Sessão do Google expirada. Rode `npm run login` e tente novamente.",
-              "warning",
-              4000
-            );
-            return;
-          }
-          if (!res.ok) {
-            const txt = await res.text().catch(() => "");
-            throw new Error(`Servidor respondeu ${res.status}. ${txt}`.trim());
-          }
-
-          const json = await res.json();
-          if (!json?.ok || !json?.dataUrl) {
-            throw new Error(json?.error || "Resposta do servidor inválida");
-          }
-
-          setShotForPage(p, json.dataUrl);
-
-          const safe = (p.title || "captura")
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-+|-+$/g, "");
-
-          const a = document.createElement("a");
-          a.href = json.dataUrl;
-          a.download = `${safe}.png`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-
-          atualizarSaida?.();
-          toast("✅ Imagem salva e baixada!", "success");
-        } catch (err) {
-          console.error("Erro na captura:", err);
-          toast(
-            "❌ Falha ao capturar. Verifique o console do servidor.",
-            "error"
-          );
-        } finally {
-          captureButton.disabled = false;
-          updateCaptureButtonState();
-        }
-      }
-
-      // ===== PDF EXPORT =====
-      function safeTitle(s) {
-        return (s || "relatorio").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-      }
-
-      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-      async function ensureShotFor(p) {
-        let shot = getShotForPage?.(p);
-        if (shot) return shot;
-
-        const url = `${CAPTURE_ENDPOINT}?url=${encodeURIComponent(p.src)}&w=${p.width||600}&h=${p.height||1500}`;
-        const res = await fetch(url);
-        if (res.status === 401) {
-          toast?.("🔒 Sessão Google expirada. Rode `npm run login` e tente novamente.", "warning", 4000);
-          throw new Error("LOGIN_REQUIRED");
-        }
-        if (!res.ok) throw new Error("CAPTURE_FAIL");
-        const json = await res.json();
-        if (!json?.ok || !json?.dataUrl) throw new Error("RES_INVALID");
-
-        setShotForPage?.(p, json.dataUrl);
-        updateCaptureButtonState?.();
-        return json.dataUrl;
-      }
-
-      function buildNotesHtml(p) {
-        const analise = (document.getElementById("analise")?.innerText || "").trim();
-        const criticos = (document.getElementById("criticos")?.innerText || "").trim();
-
-        const ul = document.getElementById("commentList");
-        const comments = [];
-        if (ul) {
-          ul.querySelectorAll("li").forEach(li => {
-            const text = (li.querySelector(".comment-text")?.innerText || "").trim();
-            const tag = (li.querySelector(".comment-tag")?.innerText || "").trim();
-            if (text) comments.push({ text, tag });
-          });
-        }
-
-        const fmt = (txt) => {
-          if (!txt) return '<p class="empty">— Sem conteúdo informado —</p>';
-          const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-          if (lines.length === 1) return `<p>${escapeHtml(lines[0])}</p>`;
-          return `<ul class="print-list">` + lines.map(l => `<li>${escapeHtml(l)}</li>`).join("") + `</ul>`;
-        };
-
-        return `
-          <div class="print-meta">
-            <div><strong>${escapeHtml(p.title || "Relatório")}</strong></div>
-            <div>${new Date().toLocaleDateString("pt-BR")}</div>
-          </div>
-
-          <h1>Notas do Analista</h1>
-
-          <h2>Análise</h2>
-          <div class="print-card">${fmt(analise)}</div>
-
-          <h2>Pontos Críticos</h2>
-          <div class="print-card">${fmt(criticos)}</div>
-
-          <h2>Comentários</h2>
-          <div class="print-card print-comments">
-            ${
-              comments.length
-                ? comments.map(c => `<div class="c-item">${escapeHtml(c.text)} ${c.tag ? `<span class="print-tag">${escapeHtml(c.tag)}</span>` : ""}</div>`).join("")
-                : '<p class="empty">— Sem comentários adicionados —</p>'
-            }
-          </div>
-        `;
-      }
-
-      function escapeHtml(s) {
-        return s.replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
-      }
-
-      async function renderNotesPageForPdf(p) {
-        const root = document.getElementById("notesPrintRoot");
-        if (!root) throw new Error("notesPrintRoot missing");
-        root.innerHTML = buildNotesHtml(p);
-        root.classList.remove("hidden");
-
-        await sleep(0);
-        const canvas = await html2canvas(root, { backgroundColor: "#ffffff", scale: 2, useCORS: true, windowWidth: 600 });
-        const dataUrl = canvas.toDataURL("image/png");
-        const height = canvas.height / 2;
-
-        root.classList.add("hidden");
-        root.innerHTML = "";
-        return { dataUrl, height };
-      }
-
-      async function exportCurrentAsTwoPagesPDF() {
-        setActiveStep(2);
-
-        try {
-          const p = pages[currentIndex];
-          if (!p) return;
-
-          const shot = await ensureShotFor(p);
-
-          const pageW = p.width || 600;
-          const pageH = p.height || 1500;
-          const { jsPDF } = window.jspdf;
-          const pdf = new jsPDF({ unit: "px", format: [pageW, pageH], compress: true });
-
-          pdf.addImage(shot, "PNG", 0, 0, pageW, pageH, undefined, "SLOW");
-
-          const { dataUrl, height } = await renderNotesPageForPdf(p);
-          pdf.addPage([pageW, height]);
-          pdf.addImage(dataUrl, "PNG", 0, 0, pageW, height, undefined, "SLOW");
-
-          pdf.save(`${safeTitle(p.title)}.pdf`);
-          toast?.("✅ PDF gerado com sucesso!", "success");
-        } catch (err) {
-          console.error(err);
-          const msg = (err && err.message === "LOGIN_REQUIRED")
-            ? "🔒 Sessão expirada. Rode `npm run login`."
-            : "❌ Não foi possível gerar o PDF.";
-          toast?.(msg, "error");
-        } finally {
-          setActiveStep(0);
-        }
-      }
-
-      function showPDFOptions(){ exportCurrentAsTwoPagesPDF(); }
-
-      // ===== REPORT PREVIEW =====
-      function atualizarSaida() {
-        const analise =
-          document.getElementById("analise").innerText.trim() ||
-          "Nenhuma análise informada.";
-        const criticos =
-          document.getElementById("criticos").innerText.trim() ||
-          "Nenhum ponto crítico informado.";
-        const resumo =
-          document.getElementById("resumo").innerText.trim() ||
-          "Nenhum resumo informado.";
-        const now = new Date().toLocaleString("pt-BR");
-
-        // Atualizado para uma visualização mais limpa
-        document.getElementById("saida").innerHTML = `
-          <div style="padding: 2rem; background: white; border-radius: 16px; margin: 2rem 0;">
-            <h2 style="color: var(--sicredi-green); margin-bottom: 1rem;">📋 Relatório Sicredi</h2>
-            <div style="text-align:center;margin-bottom:20px;color:#666;font-style:italic">
-              <em>📅 Gerado em ${now}</em>
-            </div>
-            <!-- Conteúdo do relatório mantido -->
-          </div>`;
-      }
-
-      function scrollToReport() {
-        document
-          .getElementById("saida")
-          ?.scrollIntoView({ behavior: "smooth" });
-      }
-
-      // ===== UTILITIES =====
-      function debounce(fn, wait) {
-        let t;
-        return (...a) => {
-          clearTimeout(t);
-          t = setTimeout(() => fn(...a), wait);
-        };
-      }
-
-      function escapeHTML(s) {
-        return String(s || "").replace(
-          /[&<>"']/g,
-          (m) =>
-            ({
-              "&": "&amp;",
-              "<": "&lt;",
-              ">": "&gt;",
-              '"': "&quot;",
-              "'": "&#39;",
-            }[m])
-        );
-      }
-
-      function toast(message, type = "info", ms = 2500) {
-        document.querySelector(".notification")?.remove();
-        const n = document.createElement("div");
-        n.className = `notification ${type}`;
-        n.textContent = message;
-        document.body.appendChild(n);
-        setTimeout(() => n.classList.add("show"), 10);
-        setTimeout(() => {
-          n.classList.remove("show");
-          setTimeout(() => n.remove(), 300);
-        }, ms);
-      }
-
-      function setupKeyboardNavigation() {
-        document.addEventListener("keydown", (e) => {
-          if (e.ctrlKey || e.metaKey) {
-            if (e.key === "s") {
-              e.preventDefault();
-              showPDFOptions();
-            }
-            if (e.key === "r") {
-              e.preventDefault();
-              scrollToReport();
-            }
-          }
-          if (e.key === "ArrowLeft" && !e.target.isContentEditable) prevPage();
-          if (e.key === "ArrowRight" && !e.target.isContentEditable) nextPage();
-        });
-      }
-
-      // ===== HELP MODAL =====
-      function showHelpModal() {
-        document.getElementById("modalRoot").innerHTML = `
-          <div class="modal-overlay show">
-            <div class="modal">
-              <h3>📚 Como usar o Sistema</h3>
-              <p><strong>1. Escolha o Dashboard:</strong> Selecione um dos relatórios disponíveis na lista à esquerda.</p>
-              <p><strong>2. Adicione Análises:</strong> Preencha os campos de análise, pontos críticos e resumo executivo.</p>
-              <p><strong>3. Capture Imagens:</strong> Clique em "Capturar" para salvar screenshots dos dashboards.</p>
-              <p><strong>4. Adicione Comentários:</strong> Registre observações específicas para cada página.</p>
-              <p><strong>5. Exporte o PDF:</strong> Gere o relatório final com todas as informações consolidadas.</p>
-              <p style="margin-top: 1rem;"><em>💡 Dica: Use Ctrl+S para exportar rapidamente o PDF!</em></p>
-              <div class="modal-buttons">
-                <button class="modal-btn primary" onclick="closeModal()">Entendi! 👍</button>
-              </div>
-            </div>
-          </div>`;
-      }
-
-      function closeModal() {
-        document.getElementById("modalRoot").innerHTML = "";
-      }
-    </script>
-  </body>
-</html>
+    <!-- Print Root (Hidden) -->
+    <div id="notesPrintRoot" class="print-root hidden"></div>
