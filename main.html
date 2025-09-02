@@ -583,33 +583,50 @@
           return `<ul class="print-list">` + lines.map(l => `<li>${escapeHtml(l)}</li>`).join("") + `</ul>`;
         };
 
-        return `
+        const header = `
           <div class="print-meta">
             <div><strong>${escapeHtml(p.title || "Relatório")}</strong></div>
             <div>${new Date().toLocaleDateString("pt-BR")}</div>
           </div>
-
           <h1>Notas do Analista</h1>
-
           <h2>Análise</h2>
           <div class="print-card">${fmt(analise)}</div>
-
-          <h2>Pontos Críticos</h2>
-          <div class="print-card">${fmt(criticos)}</div>
-
-          <h2>Comentários</h2>
-          <div class="print-card print-comments">
-            ${
-              comments.length
-                ? comments.map(c => `<div class="c-item">${escapeHtml(c.text)} ${c.tag ? `<span class="print-tag">${escapeHtml(c.tag)}</span>` : ""}</div>`).join("")
-                : '<p class="empty">— Sem comentários adicionados —</p>'
-            }
-          </div>
         `;
+
+        const blocos = [header];
+
+        if (criticos) {
+          blocos.push(`
+            <h2>Pontos Críticos</h2>
+            <div class="print-card">${fmt(criticos)}</div>
+          `);
+        }
+
+        return blocos.join("");
       }
 
       function escapeHtml(s) {
         return s.replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+      }
+
+      // Fatia um canvas 2x do html2canvas em partes com altura de uma página (em px 1x)
+      function sliceCanvasIntoDataUrls(canvas, pageH_px) {
+        const scale = 2;                      // usamos scale:2 no html2canvas
+        const sliceH2x = pageH_px * scale;    // altura do corte no canvas 2x
+        const slices = [];
+        let y = 0;
+
+        while (y < canvas.height) {
+          const h = Math.min(sliceH2x, canvas.height - y);
+          const tmp = document.createElement("canvas");
+          tmp.width = canvas.width;
+          tmp.height = h;
+          const ctx = tmp.getContext("2d");
+          ctx.drawImage(canvas, 0, y, canvas.width, h, 0, 0, canvas.width, h);
+          slices.push(tmp.toDataURL("image/png"));
+          y += h;
+        }
+        return slices;
       }
 
       async function renderNotesPageForPdf(p) {
@@ -619,13 +636,17 @@
         root.classList.remove("hidden");
 
         await sleep(0);
-        const canvas = await html2canvas(root, { backgroundColor: "#ffffff", scale: 2, useCORS: true, windowWidth: 600 });
-        const dataUrl = canvas.toDataURL("image/png");
-        const height = canvas.height / 2;
+        const canvas = await html2canvas(root, {
+          backgroundColor: "#ffffff",
+          scale: 2,
+          useCORS: true,
+          windowWidth: 600
+        });
 
+        const height = canvas.height / 2; // altura "1x" do conteúdo
         root.classList.add("hidden");
         root.innerHTML = "";
-        return { dataUrl, height };
+        return { canvas, height };
       }
 
       async function exportCurrentAsTwoPagesPDF() {
@@ -637,16 +658,34 @@
 
           const shot = await ensureShotFor(p);
 
-          const pageW = p.width || 600;
+          const pageW = p.width  || 600;
           const pageH = p.height || 1500;
+
           const { jsPDF } = window.jspdf;
           const pdf = new jsPDF({ unit: "px", format: [pageW, pageH], compress: true });
 
+          // Página 1: screenshot do dashboard no tamanho fixo
           pdf.addImage(shot, "PNG", 0, 0, pageW, pageH, undefined, "SLOW");
 
-          const { dataUrl, height } = await renderNotesPageForPdf(p);
-          pdf.addPage([pageW, height]);
-          pdf.addImage(dataUrl, "PNG", 0, 0, pageW, height, undefined, "SLOW");
+          // Páginas seguintes: Notas (Análise / Pontos Críticos)
+          const { canvas, height } = await renderNotesPageForPdf(p);
+
+          if (height <= pageH) {
+            // Cabe em 1 página: mantém o MESMO tamanho da 1ª folha
+            pdf.addPage([pageW, pageH]);
+            pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, pageW, height, undefined, "SLOW");
+          } else {
+            // Quebra em múltiplas páginas do MESMO tamanho da 1ª folha
+            const slices = sliceCanvasIntoDataUrls(canvas, pageH);
+            for (let i = 0; i < slices.length; i++) {
+              // Altura visível da fatia (1x). A última pode ser menor que pageH.
+              const remaining = height - i * pageH;
+              const drawH = Math.min(pageH, remaining);
+
+              pdf.addPage([pageW, pageH]);
+              pdf.addImage(slices[i], "PNG", 0, 0, pageW, drawH, undefined, "SLOW");
+            }
+          }
 
           pdf.save(`${safeTitle(p.title)}.pdf`);
           toast?.("✅ PDF gerado com sucesso!", "success");
