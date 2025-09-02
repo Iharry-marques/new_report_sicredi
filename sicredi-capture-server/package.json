@@ -1,0 +1,29 @@
+{
+  "name": "sicredi-dashboard-capture",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Servidor para captura de dashboards Sicredi com autenticação Google",
+  "main": "server.js",
+  "refresh-cookies": "node refresh-cookies.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "login": "node refresh-cookies.js",
+    "status": "curl http://localhost:3001/status",
+    "test": "curl 'http://localhost:3001/capture?url=https://lookerstudio.google.com/embed/reporting/475a3c3e-e6f6-4341-a5d2-c493f486d380/page/p_i6m9xrzjtd&w=600&h=1050'"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "fs-extra": "^11.3.1",
+    "puppeteer": "^24.18.0"
+  },
+  "keywords": [
+    "sicredi",
+    "dashboard",
+    "capture",
+    "google-auth"
+  ],
+  "author": "Sicredi Team",
+  "license": "MIT"
+}
