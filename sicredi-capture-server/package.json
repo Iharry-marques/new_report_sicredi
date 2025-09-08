@@ -4,13 +4,26 @@
   "type": "module",
   "description": "Servidor para captura de dashboards Sicredi com autenticação Google",
   "main": "server.js",
-  "refresh-cookies": "node refresh-cookies.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
     "login": "node refresh-cookies.js",
-    "status": "curl http://localhost:3001/status",
-    "test": "curl 'http://localhost:3001/capture?url=https://lookerstudio.google.com/embed/reporting/475a3c3e-e6f6-4341-a5d2-c493f486d380/page/p_i6m9xrzjtd&w=600&h=1050'"
+    "status": "curl -s http://localhost:3001/status | jq || curl http://localhost:3001/status",
+    "test": "node test-capture.js",
+    "test-simple": "curl -s 'http://localhost:3001/capture?url=https://lookerstudio.google.com/embed/reporting/475a3c3e-e6f6-4341-a5d2-c493f486d380/page/p_i6m9xrzjtd&w=600&h=1050' | jq .ok || echo 'Teste concluído'",
+    "health": "curl -s http://localhost:3001/health | jq || curl http://localhost:3001/health",
+    "test-connection": "curl -s 'http://localhost:3001/test-connection?url=https://lookerstudio.google.com' | jq || curl 'http://localhost:3001/test-connection?url=https://lookerstudio.google.com'",
+    "reset": "node reset.js",
+    "reset:all": "node reset.js --all",
+    "reset:cookies": "node reset.js --cookies", 
+    "reset:cache": "node reset.js --cache",
+    "clean": "rm -rf .cache && rm -f cookies.json",
+    "setup": "chmod +x setup.sh && ./setup.sh",
+    "setup-manual": "npm install && echo '✅ Instalação concluída! Execute npm run login para fazer login.'",
+    "postinstall": "echo '🔧 Para começar: npm run login (fazer login) → npm start (iniciar servidor)'",
+    "logs": "tail -f *.log 2>/dev/null || echo 'Nenhum log encontrado'",
+    "deps": "npm list --depth=0",
+    "update-deps": "npm update && npm audit fix"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -18,12 +31,20 @@
     "fs-extra": "^11.3.1",
     "puppeteer": "^24.18.0"
   },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
   "keywords": [
     "sicredi",
     "dashboard",
     "capture",
-    "google-auth"
+    "google-auth",
+    "pdf-export",
+    "looker-studio"
   ],
   "author": "Sicredi Team",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

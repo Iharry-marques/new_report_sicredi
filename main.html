@@ -1,816 +1,4 @@
-<!-- Para produção/Vercel, injete este script para apontar para o serviço Render -->
-<script>
-  window.CAPTURE_ENDPOINT = "https://SEU-SERVICO.onrender.com/capture";
-</script>
-
-<!-- Scripts -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-
-    <script>
-      // ===== STATELESS MODE =====
-      (function () {
-        const PREFIXES = [
-          "sicredi_",
-          "shots",
-          "captured",
-          "comments",
-          "comment",
-          "analise",
-          "criticos",
-          "resumo",
-          "status",
-          "templates",
-          "pages",
-          "sicredi_shots_v1",
-          "sicredi_comments_v1",
-          "sicredi_status_v1",
-        ];
-
-        function clearAppStorage() {
-          const shouldClear = (key) =>
-            PREFIXES.some((p) => key === p || key.startsWith(p));
-          for (const store of [localStorage, sessionStorage]) {
-            const keys = [];
-            for (let i = 0; i < store.length; i++) keys.push(store.key(i));
-            keys.forEach((k) => {
-              if (shouldClear(k)) store.removeItem(k);
-            });
-          }
-        }
-
-        clearAppStorage();
-
-        const _setItem = localStorage.setItem.bind(localStorage);
-        const _getItem = localStorage.getItem.bind(localStorage);
-        const _removeItem = localStorage.removeItem.bind(localStorage);
-
-        const isOurKey = (k) =>
-          !!k && PREFIXES.some((p) => k === p || k.startsWith(p));
-
-        localStorage.setItem = (k, v) => {
-          if (isOurKey(k)) sessionStorage.setItem(k, v);
-          else _setItem(k, v);
-        };
-        localStorage.getItem = (k) => {
-          if (isOurKey(k)) return sessionStorage.getItem(k);
-          return _getItem(k);
-        };
-        localStorage.removeItem = (k) => {
-          if (isOurKey(k)) sessionStorage.removeItem(k);
-          else _removeItem(k);
-        };
-
-        window.addEventListener("pageshow", (e) => {
-          if (e.persisted) clearAppStorage();
-        });
-      })();
-
-      // ===== CONFIG =====
-      const CONFIG = {
-        STORAGE_KEYS: {
-          PAGES: "sicredi_pages_v2",
-          COMMENTS: "sicredi_comments_v2",
-          STATUS: "sicredi_status_v2",
-          SHOTS: "sicredi_shots_v1",
-          AUTO_SAVE: "sicredi_report_v3_",
-          TEMPLATES: "sicredi_templates_v3",
-        },
-        PDF: {
-          MARGINS: 12,
-          DEFAULT_FILENAME: "relatorio-sicredi",
-          QUALITY: 0.95,
-        },
-        DEBOUNCE_DELAY: 300,
-        AUTOSAVE_DELAY: 2000,
-      };
-
-      // PATCH: endpoint configurável
-      const CAPTURE_ENDPOINT = window.CAPTURE_ENDPOINT || "http://localhost:3001/capture";
-
-      // ===== STATE =====
-      let pages = [];
-      let currentIndex = 0;
-
-      // ===== INIT =====
-      document.addEventListener("DOMContentLoaded", async () => {
-        let fetchedPages;
-        try {
-          const response = await fetch("./pages-config.json");
-          fetchedPages = await response.json();
-        } catch (err) {
-          console.error("Falha ao carregar pages-config.json:", err);
-          fetchedPages = [
-            {
-              title: "Página inicial padrão",
-              src: "about:blank",
-              width: "600",
-              height: "1000",
-            },
-          ];
-        }
-
-        pages = fetchedPages;
-
-        setupAutoSave();
-        setupKeyboardNavigation();
-
-        renderCurrentPage(0);
-        renderDashboardList();
-        refreshHeaderInfo();
-        updateRemoveButton();
-        atualizarSaida();
-
-        const frame = document.getElementById("reportFrame");
-        frame.addEventListener("load", () => {
-          document.getElementById("iframeSkeleton").style.display = "none";
-        });
-      });
-
-      // ===== MOBILE SIDEBAR =====
-      function toggleMobileSidebar() {
-        const sidebar = document.querySelector('.sidebar');
-        const overlay = document.querySelector('.mobile-sidebar-overlay');
-        sidebar.classList.toggle('show');
-        overlay.classList.toggle('show');
-      }
-
-      // ===== STEP NAVIGATION =====
-      function setActiveStep(index) {
-        const steps = document.querySelectorAll('.step');
-        steps.forEach((step, i) => {
-          step.classList.toggle('active', i === index);
-        });
-      }
-
-      // ===== PERSISTENCE =====
-      function loadPages() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.PAGES) || "[]"
-          );
-        } catch {
-          return [];
-        }
-      }
-
-      function persistPages() {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.PAGES, JSON.stringify(pages));
-      }
-
-      // ===== SCREENSHOTS =====
-      function loadShots() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.SHOTS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveShots(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.SHOTS, JSON.stringify(map));
-      }
-
-      function getShotForPage(p) {
-        const map = loadShots();
-        return map[pageKey(p)] || null;
-      }
-
-      function setShotForPage(p, dataUrl) {
-        const map = loadShots();
-        map[pageKey(p)] = dataUrl;
-        saveShots(map);
-      }
-
-      // ===== NAVIGATION =====
-      function prevPage() {
-        let newIndex = currentIndex - 1;
-        if (newIndex >= 0) {
-          selectPage(newIndex);
-        }
-      }
-
-      function nextPage() {
-        let newIndex = currentIndex + 1;
-        if (newIndex < pages.length) {
-          selectPage(newIndex);
-        }
-      }
-
-      // ===== HELPERS =====
-      function pageKey(page) {
-        return page?.src || `page_${currentIndex}`;
-      }
-
-      // ===== RENDER =====
-      function renderCurrentPage() {
-        const frame = document.getElementById("reportFrame");
-        const skeleton = document.getElementById("iframeSkeleton");
-        skeleton.style.display = "flex";
-
-        const page = pages[currentIndex];
-        if (!page) return;
-
-        frame.src = page.src;
-        frame.style.height = `${page.height || 1550}px`;
-
-        document.getElementById("pageTitle").textContent =
-          page.title || "Sem título";
-        document.getElementById("currentIndex").textContent = pages.length
-          ? currentIndex + 1
-          : 0;
-        document.getElementById("totalPages").textContent = pages.length;
-
-        const statusMap = loadStatuses();
-        const pageStatus = statusMap[pageKey(page)] || "pendente";
-
-        renderComments();
-        atualizarSaida();
-        updateDashboardListActiveState();
-      }
-
-      function renderDashboardList() {
-        const listContainer = document.getElementById("dashboard-list");
-        if (!listContainer) return;
-        listContainer.innerHTML = pages
-          .map(
-            (p, i) => `
-          <button class="dashboard-btn" onclick="selectPage(${i})">
-            <span class="dashboard-indicator"></span>
-            ${p.title}
-          </button>
-        `
-          )
-          .join("");
-        updateDashboardListActiveState();
-      }
-
-      function selectPage(index) {
-        currentIndex = index;
-        renderCurrentPage();
-        refreshHeaderInfo();
-        setActiveStep(0);
-      }
-
-      function updateDashboardListActiveState() {
-        document.querySelectorAll(".dashboard-btn").forEach((btn, index) => {
-          if (index === currentIndex) {
-            btn.classList.add("active");
-          } else {
-            btn.classList.remove("active");
-          }
-        });
-      }
-
-      function refreshHeaderInfo() {
-        const prevBtn = document.querySelector(
-          ".nav-controls .nav-btn:first-child"
-        );
-        const nextBtn = document.querySelector(
-          ".nav-controls .nav-btn:last-child"
-        );
-        prevBtn.disabled = currentIndex === 0;
-        nextBtn.disabled = currentIndex >= pages.length - 1;
-      }
-
-      function updateRemoveButton() {
-        // Função mantida para compatibilidade
-      }
-
-      // ===== EDIT TITLE =====
-      function editPageTitle(el) {
-        if (el.isContentEditable) return;
-        const original = el.textContent;
-        el.contentEditable = true;
-        el.classList.add("editing");
-        el.focus();
-
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-
-        const finish = (commit = true) => {
-          el.classList.remove("editing");
-          el.contentEditable = false;
-          const newTitle = el.textContent.trim();
-          if (commit && newTitle && pages[currentIndex]) {
-            pages[currentIndex].title = newTitle;
-            persistPages();
-            atualizarSaida();
-            toast("✅ Título atualizado!", "success");
-          } else {
-            el.textContent = original;
-          }
-        };
-        el.addEventListener("blur", () => finish(true), { once: true });
-        el.addEventListener(
-          "keydown",
-          (e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              finish(true);
-            }
-            if (e.key === "Escape") {
-              e.preventDefault();
-              finish(false);
-            }
-          },
-          { once: true }
-        );
-      }
-
-      // ===== STATUS =====
-      function loadStatuses() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.STATUS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveStatuses(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.STATUS, JSON.stringify(map));
-      }
-
-      function savePageStatus() {
-        const map = loadStatuses();
-        const pageStatus = "validado";
-        map[pageKey(pages[currentIndex])] = pageStatus;
-        saveStatuses(map);
-        atualizarSaida();
-      }
-
-      // ===== PAGE ACTIONS =====
-      function openCurrentInNewTab() {
-        const p = pages[currentIndex];
-        if (p?.src) window.open(p.src, "_blank", "noopener");
-      }
-
-      // ===== COMMENTS =====
-      function getCommentsMap() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.COMMENTS) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      function saveCommentsMap(map) {
-        localStorage.setItem(CONFIG.STORAGE_KEYS.COMMENTS, JSON.stringify(map));
-      }
-
-      function currentComments() {
-        const map = getCommentsMap();
-        return map[pageKey(pages[currentIndex])] || [];
-      }
-
-      function renderComments() {
-        const list = document.getElementById("commentList");
-        list.innerHTML = "";
-        currentComments().forEach((c, idx) => {
-          const li = document.createElement("li");
-          li.className = "comment-item fade-in";
-          li.innerHTML = `
-            <div class="comment-meta">
-              <span class="comment-tag">${c.tag}</span>
-              <span class="comment-info">${
-                c.author ? c.author + " • " : ""
-              }${new Date(c.createdAt).toLocaleString("pt-BR")}</span>
-            </div>
-            <div class="comment-text">${escapeHTML(c.text).replace(
-              /\n/g,
-              "<br>"
-            )}</div>
-            <div class="comment-actions">
-              <button class="btn-tiny" onclick="deleteComment(${idx})">Remover</button>
-            </div>`;
-          list.appendChild(li);
-        });
-      }
-
-      function addComment() {
-        const author = document.getElementById("commentAuthor").value.trim();
-        const tag = document.getElementById("commentTag").value;
-        const text = document.getElementById("commentText").value.trim();
-        if (!text) {
-          toast("⚠️ Escreva um comentário.", "warning");
-          return;
-        }
-        const map = getCommentsMap();
-        const key = pageKey(pages[currentIndex]);
-        map[key] = map[key] || [];
-        map[key].push({
-          author,
-          tag,
-          text,
-          createdAt: new Date().toISOString(),
-        });
-        saveCommentsMap(map);
-        document.getElementById("commentText").value = "";
-        renderComments();
-        atualizarSaida();
-        toast("💬 Comentário adicionado!", "success");
-      }
-
-      function deleteComment(index) {
-        const map = getCommentsMap();
-        const key = pageKey(pages[currentIndex]);
-        (map[key] || []).splice(index, 1);
-        saveCommentsMap(map);
-        renderComments();
-        atualizarSaida();
-      }
-
-      function clearComments() {
-        const key = pageKey(pages[currentIndex]);
-        const map = getCommentsMap();
-        map[key] = [];
-        saveCommentsMap(map);
-        renderComments();
-        atualizarSaida();
-        toast("🧹 Comentários limpos!", "success");
-      }
-
-      function exportCommentsCSV() {
-        const rows = [];
-        pages.forEach((p, i) => {
-          const key = pageKey(p);
-          const list = getCommentsMap()[key] || [];
-          const status = loadStatuses()[key] || "pendente";
-          if (!list.length) {
-            rows.push([i + 1, p.title, status, "", "", ""]);
-          } else {
-            list.forEach((c) =>
-              rows.push([
-                i + 1,
-                p.title,
-                status,
-                c.tag,
-                c.author || "",
-                c.text.replace(/\n/g, " "),
-              ])
-            );
-          }
-        });
-        const csv = ["Indice,Título,Status,Tag,Autor,Comentário"]
-          .concat(
-            rows.map((r) =>
-              r.map((s) => `"${String(s || "").replace(/"/g, '""')}"`).join(",")
-            )
-          )
-          .join("\n");
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `comentarios-sicredi-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }
-
-      // ===== AUTOSAVE / TEMPLATES =====
-      function setupAutoSave() {
-        document.querySelectorAll(".editor").forEach((ed) => {
-          const saved = localStorage.getItem(
-            CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id
-          );
-          if (saved) ed.innerText = saved;
-          ed.addEventListener(
-            "input",
-            debounce(() => {
-              localStorage.setItem(
-                CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id,
-                ed.innerText
-              );
-              toast("💾 Conteúdo salvo!", "info", 1800);
-              atualizarSaida();
-            }, CONFIG.AUTOSAVE_DELAY)
-          );
-        });
-      }
-
-      function saveTemplate(fieldId) {
-        const content = document.getElementById(fieldId).innerText.trim();
-        if (!content) return toast("⚠️ Campo vazio.", "warning");
-        const name = prompt(
-          "Nome do template:",
-          `${fieldId}_${new Date().toISOString().slice(0, 10)}`
-        );
-        if (!name) return;
-        const all = getTemplates();
-        all[name] = { fieldId, content, created: new Date().toISOString() };
-        localStorage.setItem(
-          CONFIG.STORAGE_KEYS.TEMPLATES,
-          JSON.stringify(all)
-        );
-        toast(`💾 Template "${name}" salvo!`, "success");
-      }
-
-      function loadTemplate(fieldId) {
-        const all = getTemplates();
-        const names = Object.keys(all).filter(
-          (n) => all[n].fieldId === fieldId
-        );
-        if (!names.length)
-          return toast("ℹ️ Nenhum template para este campo.", "info");
-        const list = names.map((n) => `• ${n}`).join("\n");
-        const pick = prompt(
-          `Templates disponíveis:\n${list}\n\nDigite o nome:`
-        );
-        if (pick && all[pick]) {
-          document.getElementById(fieldId).innerText = all[pick].content;
-          atualizarSaida();
-          toast(`📂 Template "${pick}" carregado!`, "success");
-        }
-      }
-
-      function getTemplates() {
-        try {
-          return JSON.parse(
-            localStorage.getItem(CONFIG.STORAGE_KEYS.TEMPLATES) || "{}"
-          );
-        } catch {
-          return {};
-        }
-      }
-
-      // ===== PDF EXPORT =====
-      function safeTitle(s) {
-        return (s || "relatorio").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-      }
-
-      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-      async function ensureShotFor(p) {
-        let shot = getShotForPage?.(p);
-        if (shot) return shot;
-
-        const url = `${CAPTURE_ENDPOINT}?url=${encodeURIComponent(p.src)}&w=${p.width||600}&h=${p.height||1500}`;
-        const res = await fetch(url);
-        if (res.status === 401) {
-          toast?.("🔒 Sessão Google expirada. Rode `npm run login` e tente novamente.", "warning", 4000);
-          throw new Error("LOGIN_REQUIRED");
-        }
-        if (!res.ok) throw new Error("CAPTURE_FAIL");
-        const json = await res.json();
-        if (!json?.ok || !json?.dataUrl) throw new Error("RES_INVALID");
-
-        setShotForPage?.(p, json.dataUrl);
-        return json.dataUrl;
-      }
-
-      function buildNotesHtml(p) {
-        const analise = (document.getElementById("analise")?.innerText || "").trim();
-        const criticos = (document.getElementById("criticos")?.innerText || "").trim();
-
-        const ul = document.getElementById("commentList");
-        const comments = [];
-        if (ul) {
-          ul.querySelectorAll("li").forEach(li => {
-            const text = (li.querySelector(".comment-text")?.innerText || "").trim();
-            const tag = (li.querySelector(".comment-tag")?.innerText || "").trim();
-            if (text) comments.push({ text, tag });
-          });
-        }
-
-        const fmt = (txt) => {
-          if (!txt) return '<p class="empty">— Sem conteúdo informado —</p>';
-          const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-          if (lines.length === 1) return `<p>${escapeHtml(lines[0])}</p>`;
-          return `<ul class="print-list">` + lines.map(l => `<li>${escapeHtml(l)}</li>`).join("") + `</ul>`;
-        };
-
-        const header = `
-          <div class="print-meta">
-            <div><strong>${escapeHtml(p.title || "Relatório")}</strong></div>
-            <div>${new Date().toLocaleDateString("pt-BR")}</div>
-          </div>
-          <h1>Notas do Analista</h1>
-          <h2>Análise</h2>
-          <div class="print-card">${fmt(analise)}</div>
-        `;
-
-        const blocos = [header];
-
-        if (criticos) {
-          blocos.push(`
-            <h2>Pontos Críticos</h2>
-            <div class="print-card">${fmt(criticos)}</div>
-          `);
-        }
-
-        return blocos.join("");
-      }
-
-      function escapeHtml(s) {
-        return s.replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
-      }
-
-      // Fatia um canvas 2x do html2canvas em partes com altura de uma página (em px 1x)
-      function sliceCanvasIntoDataUrls(canvas, pageH_px) {
-        const scale = 2;                      // usamos scale:2 no html2canvas
-        const sliceH2x = pageH_px * scale;    // altura do corte no canvas 2x
-        const slices = [];
-        let y = 0;
-
-        while (y < canvas.height) {
-          const h = Math.min(sliceH2x, canvas.height - y);
-          const tmp = document.createElement("canvas");
-          tmp.width = canvas.width;
-          tmp.height = h;
-          const ctx = tmp.getContext("2d");
-          ctx.drawImage(canvas, 0, y, canvas.width, h, 0, 0, canvas.width, h);
-          slices.push(tmp.toDataURL("image/png"));
-          y += h;
-        }
-        return slices;
-      }
-
-      async function renderNotesPageForPdf(p) {
-        const root = document.getElementById("notesPrintRoot");
-        if (!root) throw new Error("notesPrintRoot missing");
-        root.innerHTML = buildNotesHtml(p);
-        root.classList.remove("hidden");
-
-        await sleep(0);
-        const canvas = await html2canvas(root, {
-          backgroundColor: "#ffffff",
-          scale: 2,
-          useCORS: true,
-          windowWidth: 600
-        });
-
-        const height = canvas.height / 2; // altura "1x" do conteúdo
-        root.classList.add("hidden");
-        root.innerHTML = "";
-        return { canvas, height };
-      }
-
-      async function exportCurrentAsTwoPagesPDF() {
-        setActiveStep(2);
-
-        try {
-          const p = pages[currentIndex];
-          if (!p) return;
-
-          const shot = await ensureShotFor(p);
-
-          const pageW = p.width  || 600;
-          const pageH = p.height || 1500;
-
-          const { jsPDF } = window.jspdf;
-          const pdf = new jsPDF({ unit: "px", format: [pageW, pageH], compress: true });
-
-          // Página 1: screenshot do dashboard no tamanho fixo
-          pdf.addImage(shot, "PNG", 0, 0, pageW, pageH, undefined, "SLOW");
-
-          // Páginas seguintes: Notas (Análise / Pontos Críticos)
-          const { canvas, height } = await renderNotesPageForPdf(p);
-
-          if (height <= pageH) {
-            // Cabe em 1 página: mantém o MESMO tamanho da 1ª folha
-            pdf.addPage([pageW, pageH]);
-            pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, pageW, height, undefined, "SLOW");
-          } else {
-            // Quebra em múltiplas páginas do MESMO tamanho da 1ª folha
-            const slices = sliceCanvasIntoDataUrls(canvas, pageH);
-            for (let i = 0; i < slices.length; i++) {
-              // Altura visível da fatia (1x). A última pode ser menor que pageH.
-              const remaining = height - i * pageH;
-              const drawH = Math.min(pageH, remaining);
-
-              pdf.addPage([pageW, pageH]);
-              pdf.addImage(slices[i], "PNG", 0, 0, pageW, drawH, undefined, "SLOW");
-            }
-          }
-
-          pdf.save(`${safeTitle(p.title)}.pdf`);
-          toast?.("✅ PDF gerado com sucesso!", "success");
-        } catch (err) {
-          console.error(err);
-          const msg = (err && err.message === "LOGIN_REQUIRED")
-            ? "🔒 Sessão expirada. Rode `npm run login`."
-            : "⚠ Não foi possível gerar o PDF.";
-          toast?.(msg, "error");
-        } finally {
-          setActiveStep(0);
-        }
-      }
-
-      function showPDFOptions(){ exportCurrentAsTwoPagesPDF(); }
-
-      // ===== REPORT PREVIEW =====
-      function atualizarSaida() {
-        const analise =
-          document.getElementById("analise").innerText.trim() ||
-          "Nenhuma análise informada.";
-        const criticos =
-          document.getElementById("criticos").innerText.trim() ||
-          "Nenhum ponto crítico informado.";
-        const now = new Date().toLocaleString("pt-BR");
-
-        // Atualizado para uma visualização mais limpa
-        document.getElementById("saida").innerHTML = `
-          <div style="padding: 2rem; background: white; border-radius: 16px; margin: 2rem 0;">
-            <h2 style="color: var(--sicredi-green); margin-bottom: 1rem;">Relatório Sicredi</h2>
-            <div style="text-align:center;margin-bottom:20px;color:#666;font-style:italic">
-              <em>Gerado em ${now}</em>
-            </div>
-          </div>`;
-      }
-
-      function scrollToReport() {
-        document
-          .getElementById("saida")
-          ?.scrollIntoView({ behavior: "smooth" });
-      }
-
-      // ===== UTILITIES =====
-      function debounce(fn, wait) {
-        let t;
-        return (...a) => {
-          clearTimeout(t);
-          t = setTimeout(() => fn(...a), wait);
-        };
-      }
-
-      function escapeHTML(s) {
-        return String(s || "").replace(
-          /[&<>"']/g,
-          (m) =>
-            ({
-              "&": "&amp;",
-              "<": "&lt;",
-              ">": "&gt;",
-              '"': "&quot;",
-              "'": "&#39;",
-            }[m])
-        );
-      }
-
-      function toast(message, type = "info", ms = 2500) {
-        document.querySelector(".notification")?.remove();
-        const n = document.createElement("div");
-        n.className = `notification ${type}`;
-        n.textContent = message;
-        document.body.appendChild(n);
-        setTimeout(() => n.classList.add("show"), 10);
-        setTimeout(() => {
-          n.classList.remove("show");
-          setTimeout(() => n.remove(), 300);
-        }, ms);
-      }
-
-      function setupKeyboardNavigation() {
-        document.addEventListener("keydown", (e) => {
-          if (e.ctrlKey || e.metaKey) {
-            if (e.key === "s") {
-              e.preventDefault();
-              showPDFOptions();
-            }
-            if (e.key === "r") {
-              e.preventDefault();
-              scrollToReport();
-            }
-          }
-          if (e.key === "ArrowLeft" && !e.target.isContentEditable) prevPage();
-          if (e.key === "ArrowRight" && !e.target.isContentEditable) nextPage();
-        });
-      }
-
-      // ===== HELP MODAL =====
-      function showHelpModal() {
-        document.getElementById("modalRoot").innerHTML = `
-          <div class="modal-overlay show">
-            <div class="modal">
-              <h3>Como usar o Sistema</h3>
-              <p><strong>1. Escolha o Dashboard:</strong> Selecione um dos relatórios disponíveis na lista à esquerda.</p>
-              <p><strong>2. Adicione Análises:</strong> Preencha os campos de análise e pontos críticos.</p>
-              <p><strong>3. Adicione Comentários:</strong> Registre observações específicas para cada página.</p>
-              <p><strong>4. Exporte o PDF:</strong> Gere o relatório final com todas as informações consolidadas.</p>
-              <p style="margin-top: 1rem;"><em>Dica: Use Ctrl+S para exportar rapidamente o PDF!</em></p>
-              <div class="modal-buttons">
-                <button class="modal-btn primary" onclick="closeModal()">Entendi!</button>
-              </div>
-            </div>
-          </div>`;
-      }
-
-      function closeModal() {
-        document.getElementById("modalRoot").innerHTML = "";
-      }
-    </script>
-  </body>
-</html><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-br">
   <head>
     <meta charset="UTF-8" />
@@ -2330,24 +1518,834 @@
     <!-- Print Root (Hidden) -->
     <div id="notesPrintRoot" class="print-root hidden"></div>
 
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
     <script>
-      // ===== IMPORTANTE =====
-      // Para que o sistema funcione corretamente, é necessário que alguns cookies sejam definidos.
-      // Estes cookies são usados para autenticação e configuração do ambiente.
-      // Não remova ou altere esta seção sem entender as consequências.
-
-      function setCookie(name, value, days) {
-        const expires = new Date(Date.now() + days * 864e5).toUTCString();
-        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/`;
-      }
-
-      // Defina aqui os cookies importantes para o funcionamento do sistema.
-      const importantCookies = {
-        // Exemplo:
-        // 'cookie_name': 'cookie_value',
+      // ===== CONFIGURAÇÕES =====
+      const CONFIG = {
+        STORAGE_KEYS: {
+          PAGES: "sicredi_pages_v2",
+          COMMENTS: "sicredi_comments_v2",
+          STATUS: "sicredi_status_v2",
+          SHOTS: "sicredi_shots_v1",
+          AUTO_SAVE: "sicredi_report_v3_",
+          TEMPLATES: "sicredi_templates_v3",
+        },
+        PDF: {
+          MARGINS: 12,
+          DEFAULT_FILENAME: "relatorio-sicredi",
+          QUALITY: 0.95,
+        },
+        DEBOUNCE_DELAY: 300,
+        AUTOSAVE_DELAY: 2000,
       };
 
-      setCookie(...importantCookies);
+      // Endpoint configurável (dev vs prod)
+      const API_BASE = window.location.hostname === 'localhost' 
+        ? "http://localhost:3001" 
+        : window.location.origin;
+      
+      const CAPTURE_ENDPOINT = `${API_BASE}/capture`;
+
+      // ===== STATE =====
+      let pages = [];
+      let currentIndex = 0;
+
+      // ===== INIT =====
+      document.addEventListener("DOMContentLoaded", async () => {
+        // Verificar status do servidor
+        await checkServerStatus();
+        
+        let fetchedPages;
+        try {
+          const response = await fetch("./pages-config.json");
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          fetchedPages = await response.json();
+        } catch (err) {
+          console.error("Falha ao carregar pages-config.json:", err);
+          toast("⚠️ Erro ao carregar configuração dos dashboards", "warning");
+          fetchedPages = [
+            {
+              title: "Página inicial padrão",
+              src: "about:blank",
+              width: "600",
+              height: "1000",
+            },
+          ];
+        }
+
+        pages = fetchedPages;
+
+        setupAutoSave();
+        setupKeyboardNavigation();
+
+        renderCurrentPage(0);
+        renderDashboardList();
+        refreshHeaderInfo();
+        updateRemoveButton();
+        atualizarSaida();
+
+        const frame = document.getElementById("reportFrame");
+        frame.addEventListener("load", () => {
+          document.getElementById("iframeSkeleton").style.display = "none";
+        });
+      });
+
+      // ===== VERIFICAÇÃO DO SERVIDOR =====
+      async function checkServerStatus() {
+        try {
+          const response = await fetch(`${API_BASE}/health`);
+          if (!response.ok) {
+            throw new Error(`Servidor retornou ${response.status}`);
+          }
+          const data = await response.json();
+          console.log("✅ Servidor funcionando:", data.service);
+          
+          // Verificar status dos cookies
+          const statusResponse = await fetch(`${API_BASE}/status`);
+          const statusData = await statusResponse.json();
+          
+          if (!statusData.authenticated) {
+            toast("🔒 Cookies expirados. PDF pode não funcionar. Execute 'npm run login'", "warning", 5000);
+          }
+          
+        } catch (error) {
+          console.error("❌ Erro de conexão com servidor:", error);
+          toast("⚠️ Servidor não encontrado. Inicie com 'npm start' na pasta sicredi-capture-server", "error", 8000);
+        }
+      }
+
+      // ===== MOBILE SIDEBAR =====
+      function toggleMobileSidebar() {
+        const sidebar = document.querySelector('.sidebar');
+        const overlay = document.querySelector('.mobile-sidebar-overlay');
+        sidebar.classList.toggle('show');
+        overlay.classList.toggle('show');
+      }
+
+      // ===== STEP NAVIGATION =====
+      function setActiveStep(index) {
+        const steps = document.querySelectorAll('.step');
+        steps.forEach((step, i) => {
+          step.classList.toggle('active', i === index);
+        });
+      }
+
+      // ===== PERSISTENCE =====
+      function loadPages() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.PAGES) || "[]"
+          );
+        } catch {
+          return [];
+        }
+      }
+
+      function persistPages() {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.PAGES, JSON.stringify(pages));
+      }
+
+      // ===== SCREENSHOTS =====
+      function loadShots() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.SHOTS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveShots(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.SHOTS, JSON.stringify(map));
+      }
+
+      function getShotForPage(p) {
+        const map = loadShots();
+        return map[pageKey(p)] || null;
+      }
+
+      function setShotForPage(p, dataUrl) {
+        const map = loadShots();
+        map[pageKey(p)] = dataUrl;
+        saveShots(map);
+      }
+
+      // ===== NAVIGATION =====
+      function prevPage() {
+        let newIndex = currentIndex - 1;
+        if (newIndex >= 0) {
+          selectPage(newIndex);
+        }
+      }
+
+      function nextPage() {
+        let newIndex = currentIndex + 1;
+        if (newIndex < pages.length) {
+          selectPage(newIndex);
+        }
+      }
+
+      // ===== HELPERS =====
+      function pageKey(page) {
+        return page?.src || `page_${currentIndex}`;
+      }
+
+      // ===== RENDER =====
+      function renderCurrentPage() {
+        const frame = document.getElementById("reportFrame");
+        const skeleton = document.getElementById("iframeSkeleton");
+        skeleton.style.display = "flex";
+
+        const page = pages[currentIndex];
+        if (!page) return;
+
+        frame.src = page.src;
+        frame.style.height = `${page.height || 1550}px`;
+
+        document.getElementById("pageTitle").textContent =
+          page.title || "Sem título";
+        document.getElementById("currentIndex").textContent = pages.length
+          ? currentIndex + 1
+          : 0;
+        document.getElementById("totalPages").textContent = pages.length;
+
+        const statusMap = loadStatuses();
+        const pageStatus = statusMap[pageKey(page)] || "pendente";
+
+        renderComments();
+        atualizarSaida();
+        updateDashboardListActiveState();
+      }
+
+      function renderDashboardList() {
+        const listContainer = document.getElementById("dashboard-list");
+        if (!listContainer) return;
+        listContainer.innerHTML = pages
+          .map(
+            (p, i) => `
+          <button class="dashboard-btn" onclick="selectPage(${i})">
+            <span class="dashboard-indicator"></span>
+            ${escapeHTML(p.title)}
+          </button>
+        `
+          )
+          .join("");
+        updateDashboardListActiveState();
+      }
+
+      function selectPage(index) {
+        currentIndex = index;
+        renderCurrentPage();
+        refreshHeaderInfo();
+        setActiveStep(0);
+      }
+
+      function updateDashboardListActiveState() {
+        document.querySelectorAll(".dashboard-btn").forEach((btn, index) => {
+          if (index === currentIndex) {
+            btn.classList.add("active");
+          } else {
+            btn.classList.remove("active");
+          }
+        });
+      }
+
+      function refreshHeaderInfo() {
+        const prevBtn = document.querySelector(
+          ".nav-controls .nav-btn:first-child"
+        );
+        const nextBtn = document.querySelector(
+          ".nav-controls .nav-btn:last-child"
+        );
+        prevBtn.disabled = currentIndex === 0;
+        nextBtn.disabled = currentIndex >= pages.length - 1;
+      }
+
+      function updateRemoveButton() {
+        // Função mantida para compatibilidade
+      }
+
+      // ===== EDIT TITLE =====
+      function editPageTitle(el) {
+        if (el.isContentEditable) return;
+        const original = el.textContent;
+        el.contentEditable = true;
+        el.classList.add("editing");
+        el.focus();
+
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        const finish = (commit = true) => {
+          el.classList.remove("editing");
+          el.contentEditable = false;
+          const newTitle = el.textContent.trim();
+          if (commit && newTitle && pages[currentIndex]) {
+            pages[currentIndex].title = newTitle;
+            persistPages();
+            atualizarSaida();
+            toast("✅ Título atualizado!", "success");
+          } else {
+            el.textContent = original;
+          }
+        };
+        el.addEventListener("blur", () => finish(true), { once: true });
+        el.addEventListener(
+          "keydown",
+          (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              finish(true);
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              finish(false);
+            }
+          },
+          { once: true }
+        );
+      }
+
+      // ===== STATUS =====
+      function loadStatuses() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.STATUS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveStatuses(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.STATUS, JSON.stringify(map));
+      }
+
+      function savePageStatus() {
+        const map = loadStatuses();
+        const pageStatus = "validado";
+        map[pageKey(pages[currentIndex])] = pageStatus;
+        saveStatuses(map);
+        atualizarSaida();
+      }
+
+      // ===== PAGE ACTIONS =====
+      function openCurrentInNewTab() {
+        const p = pages[currentIndex];
+        if (p?.src) window.open(p.src, "_blank", "noopener");
+      }
+
+      // ===== COMMENTS =====
+      function getCommentsMap() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.COMMENTS) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      function saveCommentsMap(map) {
+        localStorage.setItem(CONFIG.STORAGE_KEYS.COMMENTS, JSON.stringify(map));
+      }
+
+      function currentComments() {
+        const map = getCommentsMap();
+        return map[pageKey(pages[currentIndex])] || [];
+      }
+
+      function renderComments() {
+        const list = document.getElementById("commentList");
+        list.innerHTML = "";
+        currentComments().forEach((c, idx) => {
+          const li = document.createElement("li");
+          li.className = "comment-item fade-in";
+          li.innerHTML = `
+            <div class="comment-meta">
+              <span class="comment-tag">${escapeHTML(c.tag)}</span>
+              <span class="comment-info">${
+                c.author ? escapeHTML(c.author) + " • " : ""
+              }${new Date(c.createdAt).toLocaleString("pt-BR")}</span>
+            </div>
+            <div class="comment-text">${escapeHTML(c.text).replace(
+              /\n/g,
+              "<br>"
+            )}</div>
+            <div class="comment-actions">
+              <button class="btn-tiny" onclick="deleteComment(${idx})">Remover</button>
+            </div>`;
+          list.appendChild(li);
+        });
+      }
+
+      function addComment() {
+        const author = document.getElementById("commentAuthor").value.trim();
+        const tag = document.getElementById("commentTag").value;
+        const text = document.getElementById("commentText").value.trim();
+        if (!text) {
+          toast("⚠️ Escreva um comentário.", "warning");
+          return;
+        }
+        const map = getCommentsMap();
+        const key = pageKey(pages[currentIndex]);
+        map[key] = map[key] || [];
+        map[key].push({
+          author,
+          tag,
+          text,
+          createdAt: new Date().toISOString(),
+        });
+        saveCommentsMap(map);
+        document.getElementById("commentText").value = "";
+        renderComments();
+        atualizarSaida();
+        toast("💬 Comentário adicionado!", "success");
+      }
+
+      function deleteComment(index) {
+        const map = getCommentsMap();
+        const key = pageKey(pages[currentIndex]);
+        (map[key] || []).splice(index, 1);
+        saveCommentsMap(map);
+        renderComments();
+        atualizarSaida();
+      }
+
+      function clearComments() {
+        const key = pageKey(pages[currentIndex]);
+        const map = getCommentsMap();
+        map[key] = [];
+        saveCommentsMap(map);
+        renderComments();
+        atualizarSaida();
+        toast("🧹 Comentários limpos!", "success");
+      }
+
+      function exportCommentsCSV() {
+        const rows = [];
+        pages.forEach((p, i) => {
+          const key = pageKey(p);
+          const list = getCommentsMap()[key] || [];
+          const status = loadStatuses()[key] || "pendente";
+          if (!list.length) {
+            rows.push([i + 1, p.title, status, "", "", ""]);
+          } else {
+            list.forEach((c) =>
+              rows.push([
+                i + 1,
+                p.title,
+                status,
+                c.tag,
+                c.author || "",
+                c.text.replace(/\n/g, " "),
+              ])
+            );
+          }
+        });
+        const csv = ["Indice,Título,Status,Tag,Autor,Comentário"]
+          .concat(
+            rows.map((r) =>
+              r.map((s) => `"${String(s || "").replace(/"/g, '""')}"`).join(",")
+            )
+          )
+          .join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `comentarios-sicredi-${new Date()
+          .toISOString()
+          .slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      // ===== AUTOSAVE / TEMPLATES =====
+      function setupAutoSave() {
+        document.querySelectorAll(".editor").forEach((ed) => {
+          const saved = localStorage.getItem(
+            CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id
+          );
+          if (saved) ed.innerText = saved;
+          ed.addEventListener(
+            "input",
+            debounce(() => {
+              localStorage.setItem(
+                CONFIG.STORAGE_KEYS.AUTO_SAVE + ed.id,
+                ed.innerText
+              );
+              toast("💾 Conteúdo salvo!", "info", 1800);
+              atualizarSaida();
+            }, CONFIG.AUTOSAVE_DELAY)
+          );
+        });
+      }
+
+      function saveTemplate(fieldId) {
+        const content = document.getElementById(fieldId).innerText.trim();
+        if (!content) return toast("⚠️ Campo vazio.", "warning");
+        const name = prompt(
+          "Nome do template:",
+          `${fieldId}_${new Date().toISOString().slice(0, 10)}`
+        );
+        if (!name) return;
+        const all = getTemplates();
+        all[name] = { fieldId, content, created: new Date().toISOString() };
+        localStorage.setItem(
+          CONFIG.STORAGE_KEYS.TEMPLATES,
+          JSON.stringify(all)
+        );
+        toast(`💾 Template "${name}" salvo!`, "success");
+      }
+
+      function loadTemplate(fieldId) {
+        const all = getTemplates();
+        const names = Object.keys(all).filter(
+          (n) => all[n].fieldId === fieldId
+        );
+        if (!names.length)
+          return toast("ℹ️ Nenhum template para este campo.", "info");
+        const list = names.map((n) => `• ${n}`).join("\n");
+        const pick = prompt(
+          `Templates disponíveis:\n${list}\n\nDigite o nome:`
+        );
+        if (pick && all[pick]) {
+          document.getElementById(fieldId).innerText = all[pick].content;
+          atualizarSaida();
+          toast(`📂 Template "${pick}" carregado!`, "success");
+        }
+      }
+
+      function getTemplates() {
+        try {
+          return JSON.parse(
+            localStorage.getItem(CONFIG.STORAGE_KEYS.TEMPLATES) || "{}"
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      // ===== PDF EXPORT =====
+      function safeTitle(s) {
+        return (s || "relatorio").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      }
+
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+      async function ensureShotFor(p) {
+        let shot = getShotForPage?.(p);
+        if (shot) {
+          console.log("📷 Usando screenshot do cache");
+          return shot;
+        }
+
+        console.log("📸 Capturando novo screenshot...");
+        const url = `${CAPTURE_ENDPOINT}?url=${encodeURIComponent(p.src)}&w=${p.width||600}&h=${p.height||1500}`;
+        
+        try {
+          const res = await fetch(url);
+          
+          if (res.status === 401) {
+            toast("🔒 Sessão Google expirada. Execute 'npm run login' e tente novamente.", "error", 6000);
+            throw new Error("LOGIN_REQUIRED");
+          }
+          
+          if (!res.ok) {
+            const errorText = await res.text();
+            console.error("Erro da API:", errorText);
+            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+          }
+          
+          const json = await res.json();
+          
+          if (!json?.ok || !json?.dataUrl) {
+            console.error("Resposta inválida:", json);
+            throw new Error("Resposta inválida do servidor");
+          }
+
+          setShotForPage?.(p, json.dataUrl);
+          console.log("✅ Screenshot capturado com sucesso");
+          return json.dataUrl;
+          
+        } catch (error) {
+          console.error("❌ Erro na captura:", error);
+          
+          if (error.message === "LOGIN_REQUIRED") {
+            throw error;
+          }
+          
+          if (error.name === 'TypeError') {
+            toast("🔗 Erro de conexão. Verifique se o servidor está rodando.", "error", 5000);
+            throw new Error("NETWORK_ERROR");
+          }
+          
+          throw error;
+        }
+      }
+
+      function buildNotesHtml(p) {
+        const analise = (document.getElementById("analise")?.innerText || "").trim();
+        const criticos = (document.getElementById("criticos")?.innerText || "").trim();
+
+        const ul = document.getElementById("commentList");
+        const comments = [];
+        if (ul) {
+          ul.querySelectorAll("li").forEach(li => {
+            const text = (li.querySelector(".comment-text")?.innerText || "").trim();
+            const tag = (li.querySelector(".comment-tag")?.innerText || "").trim();
+            if (text) comments.push({ text, tag });
+          });
+        }
+
+        const fmt = (txt) => {
+          if (!txt) return '<p class="empty">— Sem conteúdo informado —</p>';
+          const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          if (lines.length === 1) return `<p>${escapeHtml(lines[0])}</p>`;
+          return `<ul class="print-list">` + lines.map(l => `<li>${escapeHtml(l)}</li>`).join("") + `</ul>`;
+        };
+
+        const header = `
+          <div class="print-meta">
+            <div><strong>${escapeHtml(p.title || "Relatório")}</strong></div>
+            <div>${new Date().toLocaleDateString("pt-BR")}</div>
+          </div>
+          <h1>Notas do Analista</h1>
+          <h2>Análise</h2>
+          <div class="print-card">${fmt(analise)}</div>
+        `;
+
+        const blocos = [header];
+
+        if (criticos) {
+          blocos.push(`
+            <h2>Pontos Críticos</h2>
+            <div class="print-card">${fmt(criticos)}</div>
+          `);
+        }
+
+        return blocos.join("");
+      }
+
+      function escapeHtml(s) {
+        return String(s || "").replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+      }
+
+      // Fatia um canvas 2x do html2canvas em partes com altura de uma página (em px 1x)
+      function sliceCanvasIntoDataUrls(canvas, pageH_px) {
+        const scale = 2;                      // usamos scale:2 no html2canvas
+        const sliceH2x = pageH_px * scale;    // altura do corte no canvas 2x
+        const slices = [];
+        let y = 0;
+
+        while (y < canvas.height) {
+          const h = Math.min(sliceH2x, canvas.height - y);
+          const tmp = document.createElement("canvas");
+          tmp.width = canvas.width;
+          tmp.height = h;
+          const ctx = tmp.getContext("2d");
+          ctx.drawImage(canvas, 0, y, canvas.width, h, 0, 0, canvas.width, h);
+          slices.push(tmp.toDataURL("image/png"));
+          y += h;
+        }
+        return slices;
+      }
+
+      async function renderNotesPageForPdf(p) {
+        const root = document.getElementById("notesPrintRoot");
+        if (!root) throw new Error("notesPrintRoot missing");
+        root.innerHTML = buildNotesHtml(p);
+        root.classList.remove("hidden");
+
+        await sleep(100);
+        const canvas = await html2canvas(root, {
+          backgroundColor: "#ffffff",
+          scale: 2,
+          useCORS: true,
+          windowWidth: 600
+        });
+
+        const height = canvas.height / 2; // altura "1x" do conteúdo
+        root.classList.add("hidden");
+        root.innerHTML = "";
+        return { canvas, height };
+      }
+
+      async function exportCurrentAsTwoPagesPDF() {
+        setActiveStep(3);
+
+        try {
+          const p = pages[currentIndex];
+          if (!p) return;
+
+          toast("📸 Capturando screenshot do dashboard...", "info", 3000);
+          const shot = await ensureShotFor(p);
+
+          const pageW = parseInt(p.width) || 600;
+          const pageH = parseInt(p.height) || 1500;
+
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({ unit: "px", format: [pageW, pageH], compress: true });
+
+          // Página 1: screenshot do dashboard no tamanho fixo
+          pdf.addImage(shot, "PNG", 0, 0, pageW, pageH, undefined, "SLOW");
+
+          toast("📝 Renderizando notas...", "info", 2000);
+          
+          // Páginas seguintes: Notas (Análise / Pontos Críticos)
+          const { canvas, height } = await renderNotesPageForPdf(p);
+
+          if (height <= pageH) {
+            // Cabe em 1 página: mantém o MESMO tamanho da 1ª folha
+            pdf.addPage([pageW, pageH]);
+            pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, pageW, height, undefined, "SLOW");
+          } else {
+            // Quebra em múltiplas páginas do MESMO tamanho da 1ª folha
+            const slices = sliceCanvasIntoDataUrls(canvas, pageH);
+            for (let i = 0; i < slices.length; i++) {
+              // Altura visível da fatia (1x). A última pode ser menor que pageH.
+              const remaining = height - i * pageH;
+              const drawH = Math.min(pageH, remaining);
+
+              pdf.addPage([pageW, pageH]);
+              pdf.addImage(slices[i], "PNG", 0, 0, pageW, drawH, undefined, "SLOW");
+            }
+          }
+
+          const filename = `${safeTitle(p.title)}_${new Date().toISOString().slice(0, 10)}.pdf`;
+          pdf.save(filename);
+          toast("✅ PDF gerado com sucesso!", "success");
+          
+        } catch (err) {
+          console.error("❌ Erro ao gerar PDF:", err);
+          
+          let msg = "⚠ Não foi possível gerar o PDF.";
+          
+          if (err.message === "LOGIN_REQUIRED") {
+            msg = "🔒 Sessão expirada. Execute 'npm run login' no terminal.";
+          } else if (err.message === "NETWORK_ERROR") {
+            msg = "🔗 Servidor não encontrado. Execute 'npm start' na pasta sicredi-capture-server.";
+          } else if (err.message.includes("Failed to fetch")) {
+            msg = "🔗 Erro de conexão. Verifique se o servidor está rodando.";
+          }
+          
+          toast(msg, "error", 8000);
+        } finally {
+          setActiveStep(0);
+        }
+      }
+
+      function showPDFOptions(){ exportCurrentAsTwoPagesPDF(); }
+
+      // ===== REPORT PREVIEW =====
+      function atualizarSaida() {
+        const analise =
+          document.getElementById("analise").innerText.trim() ||
+          "Nenhuma análise informada.";
+        const criticos =
+          document.getElementById("criticos").innerText.trim() ||
+          "Nenhum ponto crítico informado.";
+        const now = new Date().toLocaleString("pt-BR");
+
+        // Atualizado para uma visualização mais limpa
+        document.getElementById("saida").innerHTML = `
+          <div style="padding: 2rem; background: white; border-radius: 16px; margin: 2rem 0;">
+            <h2 style="color: var(--sicredi-green); margin-bottom: 1rem;">Relatório Sicredi</h2>
+            <div style="text-align:center;margin-bottom:20px;color:#666;font-style:italic">
+              <em>Gerado em ${now}</em>
+            </div>
+          </div>`;
+      }
+
+      function scrollToReport() {
+        document
+          .getElementById("saida")
+          ?.scrollIntoView({ behavior: "smooth" });
+      }
+
+      // ===== UTILITIES =====
+      function debounce(fn, wait) {
+        let t;
+        return (...a) => {
+          clearTimeout(t);
+          t = setTimeout(() => fn(...a), wait);
+        };
+      }
+
+      function escapeHTML(s) {
+        return String(s || "").replace(
+          /[&<>"']/g,
+          (m) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            }[m])
+        );
+      }
+
+      function toast(message, type = "info", ms = 2500) {
+        document.querySelector(".notification")?.remove();
+        const n = document.createElement("div");
+        n.className = `notification ${type}`;
+        n.textContent = message;
+        document.body.appendChild(n);
+        setTimeout(() => n.classList.add("show"), 10);
+        setTimeout(() => {
+          n.classList.remove("show");
+          setTimeout(() => n.remove(), 300);
+        }, ms);
+      }
+
+      function setupKeyboardNavigation() {
+        document.addEventListener("keydown", (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            if (e.key === "s") {
+              e.preventDefault();
+              showPDFOptions();
+            }
+            if (e.key === "r") {
+              e.preventDefault();
+              scrollToReport();
+            }
+          }
+          if (e.key === "ArrowLeft" && !e.target.isContentEditable) prevPage();
+          if (e.key === "ArrowRight" && !e.target.isContentEditable) nextPage();
+        });
+      }
+
+      // ===== HELP MODAL =====
+      function showHelpModal() {
+        document.getElementById("modalRoot").innerHTML = `
+          <div class="modal-overlay show">
+            <div class="modal">
+              <h3>Como usar o Sistema</h3>
+              <p><strong>1. Escolha o Dashboard:</strong> Selecione um dos relatórios disponíveis na lista à esquerda.</p>
+              <p><strong>2. Adicione Análises:</strong> Preencha os campos de análise e pontos críticos.</p>
+              <p><strong>3. Adicione Comentários:</strong> Registre observações específicas para cada página.</p>
+              <p><strong>4. Exporte o PDF:</strong> Gere o relatório final com todas as informações consolidadas.</p>
+              <p style="margin-top: 1rem;"><em>Dica: Use Ctrl+S para exportar rapidamente o PDF!</em></p>
+              <div class="modal-buttons">
+                <button class="modal-btn primary" onclick="closeModal()">Entendi!</button>
+              </div>
+            </div>
+          </div>`;
+      }
+
+      function closeModal() {
+        document.getElementById("modalRoot").innerHTML = "";
+      }
     </script>
-   </body>
+  </body>
 </html>
