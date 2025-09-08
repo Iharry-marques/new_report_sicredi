@@ -61,7 +61,7 @@ async function refreshCookies() {
     console.log('🧪 Testando cookies...');
     const newPage = await browser.newPage();
     await newPage.goto('https://lookerstudio.google.com', { waitUntil: 'domcontentloaded' });
-    await newPage.setCookie(...importantCookies); 
+    await newPage.setCookie(...importantCookies);
     
     const title = await newPage.title();
     console.log(`📊 Página carregada: ${title}`);

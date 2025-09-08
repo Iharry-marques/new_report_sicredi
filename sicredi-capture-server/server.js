@@ -5,6 +5,16 @@ import fs from "fs/promises";
 import path from "path";
 import puppeteer from "puppeteer";
 import { fileURLToPath } from "url";
+import fsExtra from "fs-extra";
+
+// === PERFIL PERSISTENTE (Render) ===
+const PERSIST_DIR = process.env.PERSISTENT_DIR || "/data";
+const PROFILE_DIR  = process.env.CHROME_PROFILE_DIR || path.join(PERSIST_DIR, "chrome-profile");
+
+// Garante que a pasta existe
+fsExtra.ensureDirSync(PROFILE_DIR);
+
+console.log("🗂️  Perfil do Chrome:", PROFILE_DIR);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -134,7 +144,7 @@ app.get("/capture", async (req, res) => {
 
   let browser;
   try {
-    // Iniciar browser
+    // Iniciar browser com perfil persistente
     browser = await puppeteer.launch({
       headless: "new",
       args: [
@@ -144,9 +154,11 @@ app.get("/capture", async (req, res) => {
         "--disable-web-security",
         "--disable-features=VizDisplayCompositor",
         "--disable-gpu",
-        "--no-first-run"
+        "--no-first-run",
       ],
       defaultViewport: { width, height },
+      // 👇 ESSENCIAL: mantém login/cookies/localStorage dentro do perfil
+      userDataDir: PROFILE_DIR,
     });
 
     const page = await browser.newPage();
@@ -156,6 +168,11 @@ app.get("/capture", async (req, res) => {
       "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
       "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     });
+
+    // Plano B: aplicar cookies só se perfil estiver vazio (primeira execução)
+    // await applyCookies(page);
+
+    // ...restante do código...
 
     // Aplicar cookies salvos
     const cookiesApplied = await applyCookies(page);

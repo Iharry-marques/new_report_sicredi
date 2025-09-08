@@ -1,3 +1,8 @@
+<!-- Para produção/Vercel, injete este script para apontar para o serviço Render -->
+<script>
+  window.CAPTURE_ENDPOINT = "https://SEU-SERVICO.onrender.com/capture";
+</script>
+
 <!-- Scripts -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -80,7 +85,8 @@
         AUTOSAVE_DELAY: 2000,
       };
 
-      const CAPTURE_ENDPOINT = "http://localhost:3001/capture";
+      // PATCH: endpoint configurável
+      const CAPTURE_ENDPOINT = window.CAPTURE_ENDPOINT || "http://localhost:3001/capture";
 
       // ===== STATE =====
       let pages = [];
@@ -2323,3 +2329,25 @@
 
     <!-- Print Root (Hidden) -->
     <div id="notesPrintRoot" class="print-root hidden"></div>
+
+    <script>
+      // ===== IMPORTANTE =====
+      // Para que o sistema funcione corretamente, é necessário que alguns cookies sejam definidos.
+      // Estes cookies são usados para autenticação e configuração do ambiente.
+      // Não remova ou altere esta seção sem entender as consequências.
+
+      function setCookie(name, value, days) {
+        const expires = new Date(Date.now() + days * 864e5).toUTCString();
+        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/`;
+      }
+
+      // Defina aqui os cookies importantes para o funcionamento do sistema.
+      const importantCookies = {
+        // Exemplo:
+        // 'cookie_name': 'cookie_value',
+      };
+
+      setCookie(...importantCookies);
+    </script>
+   </body>
+</html>
